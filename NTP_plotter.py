@@ -91,6 +91,16 @@ ax.set_xlabel("Time")
 ax.set_title(f"NTP clock offset - {NTP_SERVER}")
 
 ax.axhline(0, linestyle="--")
+status_indicator = ax.text(
+    0.01,
+    0.98,
+    "Waiting for NTP sample…",
+    transform=ax.transAxes,
+    ha="left",
+    va="top",
+    color="white",
+    bbox={"boxstyle": "round,pad=0.35", "facecolor": "#666666", "edgecolor": "none"},
+)
 
 fig.autofmt_xdate()
 
@@ -146,6 +156,13 @@ while running:
 
     if sample_time is not None:
 
+        status_indicator.set_text("Connected")
+        status_indicator.set_bbox({
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#2e7d32",
+            "edgecolor": "none",
+        })
+
         # Detect midnight.
         if (
             previous_time is not None
@@ -189,6 +206,14 @@ while running:
 
         failure_time = datetime.now()
 
+        status_indicator.set_text("Connection failed")
+        status_indicator.set_bbox({
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#c62828",
+            "edgecolor": "none",
+        })
+
+        # NaN breaks the line at this sample, making the outage visible.
         current_segment[0].append(failure_time)
         current_segment[1].append(math.nan)
 
