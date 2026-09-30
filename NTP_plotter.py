@@ -217,6 +217,27 @@ while running:
         current_segment[0].append(failure_time)
         current_segment[1].append(math.nan)
 
+        ax.axvline(
+            failure_time,
+            color="#c62828",
+            alpha=0.2,
+            linewidth=1,
+        )
+        ax.annotate(
+            "FAILED",
+            xy=(failure_time, 0.92),
+            xycoords=("data", "axes fraction"),
+            ha="center",
+            va="top",
+            color="white",
+            fontsize=8,
+            bbox={
+                "boxstyle": "round,pad=0.25",
+                "facecolor": "#c62828",
+                "edgecolor": "none",
+            },
+        )
+
         current_segment[2].set_data(
             current_segment[0],
             current_segment[1]
