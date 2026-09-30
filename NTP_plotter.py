@@ -118,7 +118,9 @@ def start_new_segment():
     times = []
     offsets = []
 
-    line, = ax.plot([], [])
+    # Mark samples so a newly started segment is visible immediately, even
+    # before it has enough points to form a line.
+    line, = ax.plot([], [], marker=".", markersize=4)
 
     current_segment = [times, offsets, line]
     segments.append(current_segment)
@@ -163,12 +165,18 @@ while running:
             "edgecolor": "none",
         })
 
-        # Detect midnight.
-        if (
-            previous_time is not None
-            and sample_time < previous_time
-        ):
-            current_date += timedelta(days=1)
+        # A time-of-day decrease can mean either midnight or a manual/system
+        # clock adjustment. Only treat a near-midnight rollover as a new day.
+        if previous_time is not None and sample_time < previous_time:
+            crossed_midnight = (
+                previous_time.hour >= 23
+                and sample_time.hour <= 1
+            )
+            if crossed_midnight:
+                current_date += timedelta(days=1)
+            # Start a fresh line for either kind of discontinuity. For a clock
+            # rollback, keep the date so the new samples plot at their actual
+            # earlier wall-clock times instead of being pushed into tomorrow.
             start_new_segment()
 
         previous_time = sample_time
