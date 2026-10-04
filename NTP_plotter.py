@@ -153,6 +153,8 @@ running = True
 was_connected = None
 previous_wall_time = None
 previous_monotonic_time = None
+offset_times = []
+offset_values = []
 delay_times = []
 delay_values = []
 delay_line, = ax.plot(
@@ -161,10 +163,21 @@ delay_line, = ax.plot(
 )
 rtt_times = []
 rtt_values = []
+sample_monotonic_times = []
 rtt_line, = ax.plot(
     [], [], color="#008b8b", marker=".", markersize=4,
     label="Packet-level UDP NTP RTT",
 )
+offset_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#1f77b4", markersize=7)
+offset_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#1f77b4", markersize=7)
+delay_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#e67e22", markersize=7)
+delay_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#e67e22", markersize=7)
+rtt_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#008b8b", markersize=7)
+rtt_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#008b8b", markersize=7)
+clip_annotations = []
+CLIP_WINDOW_SECONDS = 5 * 60
+MIN_CLIP_CAP_MS = 300.0
+INITIAL_CLIP_CAP_MS = 500.0
 
 
 def mark_event(event_time, label, color):
@@ -190,10 +203,108 @@ def start_new_segment():
     # Mark samples so a newly started segment is visible immediately, even
     # before it has enough points to form a line.
     label = "NTP offset" if not segments else "_nolegend_"
-    line, = ax.plot([], [], marker=".", markersize=4, label=label)
+    line, = ax.plot([], [], color="#1f77b4", marker=".", markersize=4, label=label)
 
     current_segment = [times, offsets, line]
     segments.append(current_segment)
+
+
+def clamp_values(values, cap):
+    return [
+        min(cap, max(-cap, value)) if math.isfinite(value) else math.nan
+        for value in values
+    ]
+
+
+def refresh_capped_plot():
+    """Apply one rolling cap to all three series while retaining raw values."""
+    now = time.monotonic()
+    recent_indices = [
+        i for i, sampled_at in enumerate(sample_monotonic_times)
+        if now - sampled_at <= CLIP_WINDOW_SECONDS
+    ]
+
+    recent_values = []
+    if len(recent_indices) >= 30:
+        for i in recent_indices:
+            for series in (offset_values, delay_values, rtt_values):
+                value = series[i]
+                if math.isfinite(value):
+                    recent_values.append(abs(value))
+
+    if len(recent_indices) < 30 or not recent_values:
+        cap = INITIAL_CLIP_CAP_MS
+    else:
+        recent_values.sort()
+        percentile_index = int(0.95 * (len(recent_values) - 1))
+        cap = max(MIN_CLIP_CAP_MS, recent_values[percentile_index] * 1.25)
+
+    # Draw every line using clipped copies; the raw series remain untouched.
+    for times, values, line in segments:
+        line.set_data(times, clamp_values(values, cap))
+    delay_line.set_data(delay_times, clamp_values(delay_values, cap))
+    rtt_line.set_data(rtt_times, clamp_values(rtt_values, cap))
+
+    series_for_markers = (
+        (offset_times, offset_values, offset_clip_up, offset_clip_down),
+        (delay_times, delay_values, delay_clip_up, delay_clip_down),
+        (rtt_times, rtt_values, rtt_clip_up, rtt_clip_down),
+    )
+    visible_values = []
+    for times, values, upper_markers, lower_markers in series_for_markers:
+        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
+        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
+        upper_markers.set_data(upper_times, [cap] * len(upper_times))
+        lower_markers.set_data(lower_times, [-cap] * len(lower_times))
+        visible_values.extend(clamp_values(values, cap))
+
+    for annotation in clip_annotations:
+        annotation.remove()
+    clip_annotations.clear()
+
+    # Label each contiguous cluster of clipped points with its peak actual
+    # value. Center cluster labels between triangles; offset a lone peak below
+    # its triangle (above it for a lower-bound clip).
+    for times, values, color in (
+        (offset_times, offset_values, "#1f77b4"),
+        (delay_times, delay_values, "#e67e22"),
+        (rtt_times, rtt_values, "#008b8b"),
+    ):
+        for is_upper in (True, False):
+            clipped_indices = [
+                i for i, value in enumerate(values)
+                if math.isfinite(value) and (value > cap if is_upper else value < -cap)
+            ]
+            groups = []
+            for index in clipped_indices:
+                if not groups or index > groups[-1][-1] + 1:
+                    groups.append([index])
+                else:
+                    groups[-1].append(index)
+
+            for group in groups:
+                peak_index = max(group, key=lambda i: values[i]) if is_upper else min(group, key=lambda i: values[i])
+                label_time = times[group[0]] + (times[group[-1]] - times[group[0]]) / 2
+                annotation = ax.annotate(
+                    f"{values[peak_index]:,.0f}",
+                    xy=(label_time, cap if is_upper else -cap),
+                    xytext=(0, -12 if is_upper else 10),
+                    textcoords="offset points",
+                    ha="center",
+                    va="top" if is_upper else "bottom",
+                    color=color,
+                    fontsize=8,
+                    fontweight="bold",
+                )
+                clip_annotations.append(annotation)
+
+    finite_visible = [value for value in visible_values if math.isfinite(value)]
+    lower = min([0.0] + finite_visible)
+    top = cap * 1.08
+    bottom = lower - max(5.0, (top - lower) * 0.04)
+    ax.relim()
+    ax.autoscale_view(scalex=True, scaley=False)
+    ax.set_ylim(bottom, top)
 
 
 def on_close(event):
@@ -220,6 +331,7 @@ plt.show(block=False)
 start_time = time.monotonic()
 
 start_new_segment()
+ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
 ax.legend(loc="upper right")
 
 
@@ -294,20 +406,14 @@ while running:
 
         current_segment[0].append(plot_time)
         current_segment[1].append(offset)
-
-        current_segment[2].set_data(
-            current_segment[0],
-            current_segment[1]
-        )
+        offset_times.append(plot_time)
+        offset_values.append(offset)
         delay_times.append(plot_time)
         delay_values.append(sample_duration * 1000)
-        delay_line.set_data(delay_times, delay_values)
         rtt_times.append(plot_time)
         rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
-        rtt_line.set_data(rtt_times, rtt_values)
-
-        ax.relim()
-        ax.autoscale_view()
+        sample_monotonic_times.append(monotonic_end)
+        refresh_capped_plot()
 
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
@@ -337,6 +443,8 @@ while running:
         # NaN breaks the line at this sample, making the outage visible.
         current_segment[0].append(failure_time)
         current_segment[1].append(math.nan)
+        offset_times.append(failure_time)
+        offset_values.append(math.nan)
 
         ax.axvline(
             failure_time,
@@ -359,19 +467,12 @@ while running:
             },
         )
 
-        current_segment[2].set_data(
-            current_segment[0],
-            current_segment[1]
-        )
         delay_times.append(failure_time)
         delay_values.append(sample_duration * 1000)
-        delay_line.set_data(delay_times, delay_values)
         rtt_times.append(failure_time)
         rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
-        rtt_line.set_data(rtt_times, rtt_values)
-
-        ax.relim()
-        ax.autoscale_view()
+        sample_monotonic_times.append(monotonic_end)
+        refresh_capped_plot()
 
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
