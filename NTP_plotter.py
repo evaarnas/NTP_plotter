@@ -265,6 +265,7 @@ def refresh_capped_plot():
     # Label each contiguous cluster of clipped points with its peak actual
     # value. Center cluster labels between triangles; offset a lone peak below
     # its triangle (above it for a lower-bound clip).
+    label_candidates = []
     for times, values, color in (
         (offset_times, offset_values, "#1f77b4"),
         (delay_times, delay_values, "#e67e22"),
@@ -285,18 +286,46 @@ def refresh_capped_plot():
             for group in groups:
                 peak_index = max(group, key=lambda i: values[i]) if is_upper else min(group, key=lambda i: values[i])
                 label_time = times[group[0]] + (times[group[-1]] - times[group[0]]) / 2
-                annotation = ax.annotate(
-                    f"{values[peak_index]:,.0f}",
-                    xy=(label_time, cap if is_upper else -cap),
-                    xytext=(0, -12 if is_upper else 10),
-                    textcoords="offset points",
-                    ha="center",
-                    va="top" if is_upper else "bottom",
-                    color=color,
-                    fontsize=8,
-                    fontweight="bold",
-                )
-                clip_annotations.append(annotation)
+                label = f"{values[peak_index]:,.0f}"
+                label_candidates.append((label_time, is_upper, color, label))
+
+    label_rows = {True: [], False: []}
+    for label_time, is_upper, color, label in sorted(
+        label_candidates, key=lambda item: mdates.date2num(item[0])
+    ):
+        x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
+        label_half_width = max(12, len(label) * 4)
+        row = next(
+            (
+                row_index
+                for row_index, row_right in enumerate(label_rows[is_upper])
+                if x_pixel - label_half_width > row_right + 6
+            ),
+            len(label_rows[is_upper]),
+        )
+        if row == len(label_rows[is_upper]):
+            label_rows[is_upper].append(float("-inf"))
+        label_rows[is_upper][row] = x_pixel + label_half_width
+
+        annotation = ax.annotate(
+            label,
+            xy=(label_time, cap if is_upper else -cap),
+            xytext=(0, (-12 - row * 14) if is_upper else (10 + row * 14)),
+            textcoords="offset points",
+            ha="center",
+            va="top" if is_upper else "bottom",
+            color=color,
+            fontsize=8,
+            fontweight="bold",
+            bbox={
+                "boxstyle": "round,pad=0.15",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.95,
+            },
+            zorder=10,
+        )
+        clip_annotations.append(annotation)
 
     finite_visible = [value for value in visible_values if math.isfinite(value)]
     lower = min([0.0] + finite_visible)
@@ -320,6 +349,8 @@ def adapt_y_ticks(event=None):
     plot_height = ax.get_window_extent().height
     tick_intervals = max(5, int(plot_height / 55))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_intervals))
+    if sample_monotonic_times:
+        refresh_capped_plot()
     fig.canvas.draw_idle()
 
 
