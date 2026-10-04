@@ -290,21 +290,48 @@ def refresh_capped_plot():
                 label_candidates.append((label_time, is_upper, color, label))
 
     label_rows = {True: [], False: []}
+    legend_bbox = None
+    legend = ax.get_legend()
+    if legend is not None:
+        try:
+            legend_bbox = legend.get_window_extent(fig.canvas.get_renderer())
+        except RuntimeError:
+            pass
+
     for label_time, is_upper, color, label in sorted(
         label_candidates, key=lambda item: mdates.date2num(item[0])
     ):
         x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
-        label_half_width = max(12, len(label) * 4)
-        row = next(
-            (
-                row_index
-                for row_index, row_right in enumerate(label_rows[is_upper])
-                if x_pixel - label_half_width > row_right + 6
-            ),
-            len(label_rows[is_upper]),
-        )
-        if row == len(label_rows[is_upper]):
-            label_rows[is_upper].append(float("-inf"))
+        # Reserve extra horizontal space so labels stack before their boxes touch.
+        label_half_width = max(16, len(label) * 5)
+        row = 0
+        while True:
+            while row == len(label_rows[is_upper]):
+                label_rows[is_upper].append(float("-inf"))
+            has_horizontal_room = (
+                x_pixel - label_half_width > label_rows[is_upper][row] + 12
+            )
+            overlaps_legend = False
+            if legend_bbox is not None:
+                anchor_y = ax.transData.transform((mdates.date2num(label_time), cap if is_upper else -cap))[1]
+                offset_y = (-12 - row * 14) if is_upper else (10 + row * 14)
+                label_y = anchor_y + offset_y * fig.dpi / 72
+                label_height = 16
+                label_box = (
+                    x_pixel - label_half_width,
+                    label_y - label_height if is_upper else label_y,
+                    x_pixel + label_half_width,
+                    label_y if is_upper else label_y + label_height,
+                )
+                overlaps_legend = not (
+                    label_box[2] < legend_bbox.x0
+                    or label_box[0] > legend_bbox.x1
+                    or label_box[3] < legend_bbox.y0
+                    or label_box[1] > legend_bbox.y1
+                )
+            if has_horizontal_room and not overlaps_legend:
+                break
+            row += 1
         label_rows[is_upper][row] = x_pixel + label_half_width
 
         annotation = ax.annotate(
