@@ -181,7 +181,6 @@ rtt_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#008b8b", ma
 rtt_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#008b8b", markersize=7)
 clip_annotations = []
 CLIP_WINDOW_SECONDS = 5 * 60
-MIN_CLIP_CAP_MS = 300.0
 INITIAL_CLIP_CAP_MS = 500.0
 
 
@@ -230,22 +229,23 @@ def refresh_capped_plot():
     ]
 
     recent_values = []
-    if len(recent_indices) >= 30:
+    if recent_indices:
         for i in recent_indices:
             for series in (offset_values, delay_values, rtt_values):
                 value = series[i]
                 if math.isfinite(value):
                     recent_values.append(abs(value))
 
-    if len(recent_indices) < 30 or not recent_values:
+    if not recent_values:
         cap = INITIAL_CLIP_CAP_MS
     else:
         recent_values.sort()
         percentile_index = int((CAP_PERCENTILE / 100) * (len(recent_values) - 1))
-        cap = max(
-            MIN_CLIP_CAP_MS,
-            recent_values[percentile_index] * CAP_HEADROOM_MULTIPLIER,
-        )
+        cap = max(1.0, recent_values[percentile_index] * CAP_HEADROOM_MULTIPLIER)
+
+    cap_config_status.set_text(
+        f"Cap: {CAP_PERCENTILE:g}% × {CAP_HEADROOM_MULTIPLIER:g} = {cap:.0f} ms"
+    )
 
     # Draw every line using clipped copies; the raw series remain untouched.
     for times, values, line in segments:
