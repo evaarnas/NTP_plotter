@@ -179,6 +179,11 @@ delay_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#e67e22", 
 delay_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#e67e22", markersize=7)
 rtt_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#008b8b", markersize=7)
 rtt_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#008b8b", markersize=7)
+highest_clip_marker, = ax.plot(
+    [], [], linestyle="none", marker="^", color="#d62728",
+    markeredgecolor="white", markeredgewidth=0.8, markersize=10,
+    zorder=3, label="_nolegend_",
+)
 clip_annotations = []
 CLIP_WINDOW_SECONDS = 5 * 60
 INITIAL_CLIP_CAP_MS = 500.0
@@ -259,12 +264,33 @@ def refresh_capped_plot():
         (rtt_times, rtt_values, rtt_clip_up, rtt_clip_down),
     )
     visible_values = []
+    clipped_points = []
     for times, values, upper_markers, lower_markers in series_for_markers:
         upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
         lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
         upper_markers.set_data(upper_times, [cap] * len(upper_times))
         lower_markers.set_data(lower_times, [-cap] * len(lower_times))
         visible_values.extend(clamp_values(values, cap))
+        clipped_points.extend(
+            (value, sampled_at)
+            for sampled_at, value in zip(times, values)
+            if math.isfinite(value) and abs(value) > cap
+        )
+
+    finite_visible = [value for value in visible_values if math.isfinite(value)]
+    lower = min([0.0] + finite_visible)
+    top = cap * 1.08
+    bottom = lower - max(5.0, (top - lower) * 0.04)
+    ax.relim()
+    ax.autoscale_view(scalex=True, scaley=False)
+    ax.set_ylim(bottom, top)
+
+    if clipped_points:
+        highest_value, _ = max(clipped_points, key=lambda point: abs(point[0]))
+        highest_clip_marker.set_marker("^" if highest_value > 0 else "v")
+    else:
+        highest_value = None
+        highest_clip_marker.set_data([], [])
 
     for annotation in clip_annotations:
         annotation.remove()
@@ -295,9 +321,21 @@ def refresh_capped_plot():
                 peak_index = max(group, key=lambda i: values[i]) if is_upper else min(group, key=lambda i: values[i])
                 label_time = times[group[0]] + (times[group[-1]] - times[group[0]]) / 2
                 label = f"{values[peak_index]:,.0f}"
-                label_candidates.append((label_time, is_upper, color, label))
+                peak_value = values[peak_index]
+                label_candidates.append((label_time, is_upper, color, label, peak_value))
 
     label_rows = {True: [], False: []}
+
+    highlighted_times = [
+        candidate[0] for candidate in label_candidates
+        if highest_value is not None and candidate[4] == highest_value
+    ]
+    highest_clip_marker.set_data(
+        highlighted_times,
+        [(cap if highest_value > 0 else -cap)] * len(highlighted_times)
+        if highlighted_times else [],
+    )
+
     legend_bbox = None
     legend = ax.get_legend()
     if legend is not None:
@@ -306,7 +344,7 @@ def refresh_capped_plot():
         except RuntimeError:
             pass
 
-    for label_time, is_upper, color, label in sorted(
+    for label_time, is_upper, color, label, peak_value in sorted(
         label_candidates, key=lambda item: mdates.date2num(item[0])
     ):
         x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
@@ -349,7 +387,7 @@ def refresh_capped_plot():
             textcoords="offset points",
             ha="center",
             va="top" if is_upper else "bottom",
-            color=color,
+            color="#d62728" if highest_value is not None and peak_value == highest_value else color,
             fontsize=8,
             fontweight="bold",
             bbox={
@@ -361,15 +399,6 @@ def refresh_capped_plot():
             zorder=10,
         )
         clip_annotations.append(annotation)
-
-    finite_visible = [value for value in visible_values if math.isfinite(value)]
-    lower = min([0.0] + finite_visible)
-    top = cap * 1.08
-    bottom = lower - max(5.0, (top - lower) * 0.04)
-    ax.relim()
-    ax.autoscale_view(scalex=True, scaley=False)
-    ax.set_ylim(bottom, top)
-
 
 def on_close(event):
     global running
@@ -499,6 +528,7 @@ start_time = time.monotonic()
 
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
+ax.plot([], [], linestyle="none", marker="^", color="#d62728", label="Largest clipped value")
 ax.legend(loc="upper right")
 
 
