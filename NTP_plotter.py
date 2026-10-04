@@ -30,7 +30,7 @@ def get_sampling_interval(elapsed):
     return 300
 
 
-def get_ntp_sample():
+def get_ntp_sample(server):
     """Return (sample_time, offset_ms, error)."""
 
     try:
@@ -38,7 +38,7 @@ def get_ntp_sample():
             [
                 "w32tm",
                 "/stripchart",
-                f"/computer:{NTP_SERVER}",
+                f"/computer:{server}",
                 "/samples:1",
                 "/dataonly"
             ],
@@ -86,9 +86,9 @@ ax.xaxis.set_major_formatter(
     mdates.DateFormatter("%H:%M:%S")
 )
 
-ax.set_ylabel("NTP offset (ms)")
+ax.set_ylabel("Offset / approximate command duration (ms)")
 ax.set_xlabel("Time")
-ax.set_title(f"NTP clock offset - {NTP_SERVER}")
+ax.set_title(f"NTP clock offset and approximate delay - {NTP_SERVER}")
 
 ax.axhline(0, linestyle="--")
 status_indicator = ax.text(
@@ -110,6 +110,29 @@ current_date = datetime.now().date()
 current_segment = None
 previous_time = None
 running = True
+was_connected = None
+previous_wall_time = None
+previous_monotonic_time = None
+delay_times = []
+delay_values = []
+delay_line, = ax.plot(
+    [], [], color="#e67e22", marker=".", markersize=4,
+    label="Approx. command duration",
+)
+
+
+def mark_event(event_time, label, color):
+    ax.axvline(event_time, color=color, alpha=0.8, linewidth=1.2)
+    ax.annotate(
+        label,
+        xy=(event_time, 0.86),
+        xycoords=("data", "axes fraction"),
+        ha="left",
+        va="top",
+        rotation=90,
+        color=color,
+        fontsize=8,
+    )
 
 
 def start_new_segment():
@@ -120,7 +143,8 @@ def start_new_segment():
 
     # Mark samples so a newly started segment is visible immediately, even
     # before it has enough points to form a line.
-    line, = ax.plot([], [], marker=".", markersize=4)
+    label = "NTP offset" if not segments else "_nolegend_"
+    line, = ax.plot([], [], marker=".", markersize=4, label=label)
 
     current_segment = [times, offsets, line]
     segments.append(current_segment)
@@ -138,6 +162,7 @@ plt.show(block=False)
 start_time = time.monotonic()
 
 start_new_segment()
+ax.legend(loc="upper right")
 
 
 while running:
@@ -148,9 +173,11 @@ while running:
 
     sample_start = time.monotonic()
 
-    sample_time, offset, error = get_ntp_sample()
+    sample_time, offset, error = get_ntp_sample(NTP_SERVER)
 
     sample_duration = time.monotonic() - sample_start
+    wall_end = datetime.now()
+    monotonic_end = time.monotonic()
 
     # --------------------------------------------------------------
     # Process successful sample.
@@ -186,6 +213,22 @@ while running:
             sample_time.time()
         )
 
+        if was_connected is False:
+            mark_event(plot_time, "Reconnected", "#2e7d32")
+
+        if previous_wall_time is not None:
+            wall_delta = (wall_end - previous_wall_time).total_seconds()
+            monotonic_delta = monotonic_end - previous_monotonic_time
+            adjustment = wall_delta - monotonic_delta
+            if abs(adjustment) >= 2.0:
+                mark_event(
+                    plot_time,
+                    f"System clock adjusted ({adjustment:+.1f}s)",
+                    "#1565c0",
+                )
+
+        was_connected = True
+
         current_segment[0].append(plot_time)
         current_segment[1].append(offset)
 
@@ -193,6 +236,9 @@ while running:
             current_segment[0],
             current_segment[1]
         )
+        delay_times.append(plot_time)
+        delay_values.append(sample_duration * 1000)
+        delay_line.set_data(delay_times, delay_values)
 
         ax.relim()
         ax.autoscale_view()
@@ -202,8 +248,7 @@ while running:
 
         print(
             f"{plot_time:%Y-%m-%d %H:%M:%S}, "
-            f"{offset:+.3f} ms "
-            f"(sample took {sample_duration:.3f}s)"
+            f"{offset:+.3f} ms, approximate delay {sample_duration * 1000:.1f} ms"
         )
 
     # --------------------------------------------------------------
@@ -213,6 +258,7 @@ while running:
     else:
 
         failure_time = datetime.now()
+        was_connected = False
 
         status_indicator.set_text("Connection failed")
         status_indicator.set_bbox({
@@ -250,6 +296,9 @@ while running:
             current_segment[0],
             current_segment[1]
         )
+        delay_times.append(failure_time)
+        delay_values.append(sample_duration * 1000)
+        delay_line.set_data(delay_times, delay_values)
 
         ax.relim()
         ax.autoscale_view()
@@ -260,8 +309,11 @@ while running:
         print(
             f"{failure_time:%Y-%m-%d %H:%M:%S}, "
             f"NTP FAILED: {error} "
-            f"(sample took {sample_duration:.3f}s)"
+            f"(approx. delay {sample_duration * 1000:.1f} ms)"
         )
+
+    previous_wall_time = wall_end
+    previous_monotonic_time = monotonic_end
 
     # --------------------------------------------------------------
     # Determine the interval for the NEXT sample.
