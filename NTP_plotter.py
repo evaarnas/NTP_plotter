@@ -9,9 +9,12 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import MaxNLocator
+from matplotlib.widgets import TextBox, Button
 
 
 NTP_SERVER = "time.windows.com"
+CAP_PERCENTILE = 95.0
+CAP_HEADROOM_MULTIPLIER = 1.25
 
 # (elapsed time in seconds, sampling interval in seconds)
 SAMPLING_SCHEDULE = [
@@ -121,6 +124,7 @@ def get_packet_rtt(server):
 plt.ion()
 
 fig, ax = plt.subplots()
+fig.set_size_inches(12, 8)
 
 ax.xaxis.set_major_formatter(
     mdates.DateFormatter("%H:%M:%S")
@@ -143,6 +147,7 @@ status_indicator = ax.text(
 )
 
 fig.autofmt_xdate()
+fig.subplots_adjust(bottom=0.14)
 
 segments = []
 
@@ -236,8 +241,11 @@ def refresh_capped_plot():
         cap = INITIAL_CLIP_CAP_MS
     else:
         recent_values.sort()
-        percentile_index = int(0.95 * (len(recent_values) - 1))
-        cap = max(MIN_CLIP_CAP_MS, recent_values[percentile_index] * 1.25)
+        percentile_index = int((CAP_PERCENTILE / 100) * (len(recent_values) - 1))
+        cap = max(
+            MIN_CLIP_CAP_MS,
+            recent_values[percentile_index] * CAP_HEADROOM_MULTIPLIER,
+        )
 
     # Draw every line using clipped copies; the raw series remain untouched.
     for times, values, line in segments:
@@ -383,6 +391,107 @@ def adapt_y_ticks(event=None):
 
 fig.canvas.mpl_connect("resize_event", adapt_y_ticks)
 adapt_y_ticks()
+
+percentile_text = TextBox(
+    fig.add_axes([0.05, 0.05, 0.10, 0.05]),
+    "",
+    initial=str(CAP_PERCENTILE),
+)
+headroom_text = TextBox(
+    fig.add_axes([0.27, 0.05, 0.10, 0.05]),
+    "",
+    initial=str(CAP_HEADROOM_MULTIPLIER),
+)
+apply_cap_button = Button(fig.add_axes([0.46, 0.05, 0.08, 0.05]), "Apply")
+percentile_label = fig.text(0, 0, "Percentile (%)", ha="right", va="center", fontsize=9)
+headroom_label = fig.text(0, 0, "Headroom ×", ha="right", va="center", fontsize=9)
+cap_config_status = fig.text(
+    0.57,
+    0.075,
+    f"Cap: {CAP_PERCENTILE:g}% × {CAP_HEADROOM_MULTIPLIER:g}",
+    ha="left",
+    va="center",
+    fontsize=8,
+)
+
+
+def layout_cap_controls(event=None):
+    """Keep widget boxes at fixed pixel dimensions as the window is resized."""
+    width_px, height_px = fig.canvas.get_width_height()
+    percentile_width, headroom_width = 100, 100
+    button_width, status_width = 70, 190
+    control_height, bottom_px = 34, 18
+    total_width = 88 + 8 + percentile_width + 18 + 72 + 8 + headroom_width + 14 + button_width + 14 + status_width
+    x_px = max(8, (width_px - total_width) / 2)
+
+    center_y = (bottom_px + control_height / 2) / height_px
+    percentile_label.set_position(((x_px + 88) / width_px, center_y))
+    x_px += 96
+    percentile_text.ax.set_position([x_px / width_px, bottom_px / height_px, percentile_width / width_px, control_height / height_px])
+    x_px += percentile_width + 18
+    headroom_label.set_position(((x_px + 72) / width_px, center_y))
+    x_px += 80
+    headroom_text.ax.set_position([x_px / width_px, bottom_px / height_px, headroom_width / width_px, control_height / height_px])
+    x_px += headroom_width + 14
+    apply_cap_button.ax.set_position([x_px / width_px, bottom_px / height_px, button_width / width_px, control_height / height_px])
+    x_px += button_width + 14
+    cap_config_status.set_position((x_px / width_px, (bottom_px + control_height / 2) / height_px))
+
+
+def mark_field_validity(text_box, valid):
+    color = "#888888" if valid else "#c62828"
+    for spine in text_box.ax.spines.values():
+        spine.set_edgecolor(color)
+        spine.set_linewidth(1.0 if valid else 2.0)
+    label = percentile_label if text_box is percentile_text else headroom_label
+    label.set_color("#333333" if valid else "#c62828")
+
+
+def apply_cap_settings(event=None):
+    global CAP_PERCENTILE, CAP_HEADROOM_MULTIPLIER
+    percentile = None
+    headroom = None
+    percentile_valid = True
+    headroom_valid = True
+    errors = []
+    try:
+        percentile = float(percentile_text.text)
+        percentile_valid = math.isfinite(percentile) and 0 < percentile <= 100
+    except ValueError:
+        percentile_valid = False
+    if not percentile_valid:
+        errors.append("percentile must be in (0, 100]")
+
+    try:
+        headroom = float(headroom_text.text)
+        headroom_valid = math.isfinite(headroom) and headroom > 0
+    except ValueError:
+        headroom_valid = False
+    if not headroom_valid:
+        errors.append("headroom must be greater than 0")
+
+    mark_field_validity(percentile_text, percentile_valid)
+    mark_field_validity(headroom_text, headroom_valid)
+    if errors:
+        cap_config_status.set_text("Invalid input — check red field(s)")
+        cap_config_status.set_color("#c62828")
+        fig.canvas.draw_idle()
+        return
+
+    CAP_PERCENTILE = percentile
+    CAP_HEADROOM_MULTIPLIER = headroom
+    cap_config_status.set_text(f"Cap: {CAP_PERCENTILE:g}% × {CAP_HEADROOM_MULTIPLIER:g}")
+    cap_config_status.set_color("#333333")
+    if sample_monotonic_times:
+        refresh_capped_plot()
+    fig.canvas.draw_idle()
+
+
+apply_cap_button.on_clicked(apply_cap_settings)
+percentile_text.on_submit(apply_cap_settings)
+headroom_text.on_submit(apply_cap_settings)
+layout_cap_controls()
+fig.canvas.mpl_connect("resize_event", layout_cap_controls)
 
 plt.show(block=False)
 
