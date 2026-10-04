@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.ticker import MaxNLocator
 
 
 NTP_SERVER = "time.windows.com"
@@ -201,6 +202,18 @@ def on_close(event):
 
 
 fig.canvas.mpl_connect("close_event", on_close)
+
+
+def adapt_y_ticks(event=None):
+    # Allow roughly one labeled interval per 55 screen pixels of plot height.
+    plot_height = ax.get_window_extent().height
+    tick_intervals = max(5, int(plot_height / 55))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_intervals))
+    fig.canvas.draw_idle()
+
+
+fig.canvas.mpl_connect("resize_event", adapt_y_ticks)
+adapt_y_ticks()
 
 plt.show(block=False)
 
