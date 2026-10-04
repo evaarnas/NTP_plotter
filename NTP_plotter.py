@@ -2,6 +2,8 @@ import subprocess
 import re
 import time
 import math
+import socket
+import struct
 from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
@@ -78,6 +80,43 @@ def get_ntp_sample(server):
     return None, None, error
 
 
+def get_packet_rtt(server):
+    """Return the UDP NTP request/reply time in milliseconds, or an error."""
+    request = bytearray(48)
+    request[0] = 0x23  # LI=0, NTP version 4, client mode
+    ntp_time = time.time() + 2_208_988_800
+    seconds = int(ntp_time)
+    fraction = int((ntp_time - seconds) * (1 << 32))
+    request[40:48] = struct.pack("!II", seconds, fraction)
+
+    try:
+        addresses = socket.getaddrinfo(
+            server, 123, type=socket.SOCK_DGRAM
+        )
+        last_error = "No NTP server address found"
+
+        for family, socktype, protocol, _, address in addresses:
+            try:
+                with socket.socket(family, socktype, protocol) as sock:
+                    sock.settimeout(2.0)
+                    start = time.perf_counter()
+                    sock.sendto(request, address)
+                    response, _ = sock.recvfrom(512)
+                    rtt_ms = (time.perf_counter() - start) * 1000
+
+                if len(response) < 48 or (response[0] & 0x07) != 4:
+                    last_error = "Invalid NTP server response"
+                    continue
+
+                return rtt_ms, None
+            except OSError as e:
+                last_error = str(e)
+
+        return None, last_error
+    except OSError as e:
+        return None, str(e)
+
+
 plt.ion()
 
 fig, ax = plt.subplots()
@@ -86,9 +125,9 @@ ax.xaxis.set_major_formatter(
     mdates.DateFormatter("%H:%M:%S")
 )
 
-ax.set_ylabel("Offset / approximate command duration (ms)")
+ax.set_ylabel("Offset / delay (ms)")
 ax.set_xlabel("Time")
-ax.set_title(f"NTP clock offset and approximate delay - {NTP_SERVER}")
+ax.set_title(f"NTP offset and delay measurements - {NTP_SERVER}")
 
 ax.axhline(0, linestyle="--")
 status_indicator = ax.text(
@@ -118,6 +157,12 @@ delay_values = []
 delay_line, = ax.plot(
     [], [], color="#e67e22", marker=".", markersize=4,
     label="Approx. command duration",
+)
+rtt_times = []
+rtt_values = []
+rtt_line, = ax.plot(
+    [], [], color="#008b8b", marker=".", markersize=4,
+    label="Packet-level UDP NTP RTT",
 )
 
 
@@ -176,6 +221,11 @@ while running:
     sample_time, offset, error = get_ntp_sample(NTP_SERVER)
 
     sample_duration = time.monotonic() - sample_start
+    packet_rtt_ms, packet_rtt_error = get_packet_rtt(NTP_SERVER)
+    if packet_rtt_ms is not None:
+        packet_rtt_summary = f"packet RTT {packet_rtt_ms:.1f} ms"
+    else:
+        packet_rtt_summary = f"packet RTT unavailable: {packet_rtt_error}"
     wall_end = datetime.now()
     monotonic_end = time.monotonic()
 
@@ -239,6 +289,9 @@ while running:
         delay_times.append(plot_time)
         delay_values.append(sample_duration * 1000)
         delay_line.set_data(delay_times, delay_values)
+        rtt_times.append(plot_time)
+        rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
+        rtt_line.set_data(rtt_times, rtt_values)
 
         ax.relim()
         ax.autoscale_view()
@@ -248,7 +301,8 @@ while running:
 
         print(
             f"{plot_time:%Y-%m-%d %H:%M:%S}, "
-            f"{offset:+.3f} ms, approximate delay {sample_duration * 1000:.1f} ms"
+            f"{offset:+.3f} ms, approximate command duration {sample_duration * 1000:.1f} ms, "
+            f"{packet_rtt_summary}"
         )
 
     # --------------------------------------------------------------
@@ -299,6 +353,9 @@ while running:
         delay_times.append(failure_time)
         delay_values.append(sample_duration * 1000)
         delay_line.set_data(delay_times, delay_values)
+        rtt_times.append(failure_time)
+        rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
+        rtt_line.set_data(rtt_times, rtt_values)
 
         ax.relim()
         ax.autoscale_view()
@@ -309,7 +366,8 @@ while running:
         print(
             f"{failure_time:%Y-%m-%d %H:%M:%S}, "
             f"NTP FAILED: {error} "
-            f"(approx. delay {sample_duration * 1000:.1f} ms)"
+            f"(approx. command duration {sample_duration * 1000:.1f} ms, "
+            f"{packet_rtt_summary})"
         )
 
     previous_wall_time = wall_end
