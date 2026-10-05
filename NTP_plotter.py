@@ -181,7 +181,7 @@ rtt_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#008b8b", ma
 rtt_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#008b8b", markersize=7)
 highest_clip_marker, = ax.plot(
     [], [], linestyle="none", marker="^", color="#d62728",
-    markeredgecolor="white", markeredgewidth=0.8, markersize=10,
+    markeredgecolor="white", markeredgewidth=1.0, markersize=16,
     zorder=3, label="_nolegend_",
 )
 clip_annotations = []
@@ -570,7 +570,7 @@ start_time = time.monotonic()
 
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
-ax.plot([], [], linestyle="none", marker="^", color="#d62728", label="Largest clipped value")
+ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Largest clipped value")
 ax.legend(loc="upper right")
 
 
