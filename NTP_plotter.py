@@ -185,7 +185,7 @@ highest_clip_marker, = ax.plot(
     zorder=3, label="_nolegend_",
 )
 smallest_clip_marker, = ax.plot(
-    [], [], linestyle="none", marker="v", color="#7b1fa2",
+    [], [], linestyle="none", marker="v", color="#d62728",
     markeredgecolor="white", markeredgewidth=0.8, markersize=12,
     zorder=3, label="_nolegend_",
 )
@@ -312,15 +312,15 @@ def refresh_capped_plot():
     )
     visible_values = []
     clipped_points = []
-    for times, values, upper_markers, lower_markers in series_for_markers:
+    for series_index, (times, values, upper_markers, lower_markers) in enumerate(series_for_markers):
         upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
         lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
         upper_markers.set_data(upper_times, [cap] * len(upper_times))
         lower_markers.set_data(lower_times, [-cap] * len(lower_times))
         visible_values.extend(clamp_values(values, cap))
         clipped_points.extend(
-            (value, sampled_at)
-            for sampled_at, value in zip(times, values)
+            (value, sampled_at, series_index, sample_index)
+            for sample_index, (sampled_at, value) in enumerate(zip(times, values))
             if math.isfinite(value) and abs(value) > cap
         )
 
@@ -333,14 +333,21 @@ def refresh_capped_plot():
     ax.set_ylim(bottom, top)
 
     if clipped_points:
-        highest_value, _ = max(clipped_points, key=lambda point: abs(point[0]))
+        # "Largest" means the highest signed value; the minimum below captures
+        # the lower extreme independently, so positive and negative tails both
+        # receive their own marker when present.
+        highest_point = max(clipped_points, key=lambda point: point[0])
+        highest_value, _, highest_series, highest_index = highest_point
         highest_clip_marker.set_marker("^" if highest_value > 0 else "v")
-        smallest_value, smallest_time = min(clipped_points, key=lambda point: point[0])
+        smallest_point = min(clipped_points, key=lambda point: point[0])
+        smallest_value, smallest_time, smallest_series, smallest_index = smallest_point
         smallest_clip_marker.set_marker("^" if smallest_value > 0 else "v")
     else:
         highest_value = None
+        highest_series = highest_index = None
         smallest_value = None
         smallest_time = None
+        smallest_series = smallest_index = None
         highest_clip_marker.set_data([], [])
         smallest_clip_marker.set_data([], [])
 
@@ -352,11 +359,12 @@ def refresh_capped_plot():
     # value. Center cluster labels between triangles; offset a lone peak below
     # its triangle (above it for a lower-bound clip).
     label_candidates = []
-    for times, values, color in (
+    cluster_centers = {}
+    for series_index, (times, values, color) in enumerate((
         (display_offset_times, display_offset_values, "#1f77b4"),
         (merged_delay_times, merged_delay_values, "#e67e22"),
         (merged_rtt_times, merged_rtt_values, "#008b8b"),
-    ):
+    )):
         for is_upper in (True, False):
             clipped_indices = [
                 i for i, value in enumerate(values)
@@ -374,43 +382,58 @@ def refresh_capped_plot():
                 label_time = times[group[0]] + (times[group[-1]] - times[group[0]]) / 2
                 label = f"{values[peak_index]:,.0f}"
                 peak_value = values[peak_index]
-                label_candidates.append((label_time, is_upper, color, label, peak_value))
+                label_candidates.append((
+                    label_time, is_upper, color, label, peak_value,
+                    series_index, tuple(group),
+                ))
+                for index in group:
+                    cluster_centers[(series_index, index)] = label_time
 
     label_rows = {True: [], False: []}
 
-    highlighted_times = [
-        candidate[0] for candidate in label_candidates
-        if highest_value is not None and candidate[4] == highest_value
-    ]
+    highest_time = (
+        cluster_centers.get((highest_series, highest_index), highest_point[1])
+        if highest_value is not None else None
+    )
+    highest_candidate_exists = False
+    if highest_value is not None:
+        highest_candidate_exists = any(
+            candidate[5] == highest_series and highest_index in candidate[6]
+            for candidate in label_candidates
+        )
+        if not highest_candidate_exists:
+            label_candidates.append((
+                highest_time, highest_value > 0, "#d62728",
+                f"{highest_value:,.0f}", highest_value,
+                highest_series, (highest_index,),
+            ))
     highest_clip_marker.set_data(
-        highlighted_times,
-        [(cap if highest_value > 0 else -cap)] * len(highlighted_times)
-        if highlighted_times else [],
+        [highest_time] if highest_time is not None else [],
+        [cap if highest_value > 0 else -cap] if highest_time is not None else [],
     )
 
-    smallest_times = []
-    if smallest_value is not None and smallest_value != highest_value:
-        matching_smallest = [
-            i for i, candidate in enumerate(label_candidates)
-            if candidate[4] == smallest_value
-        ]
-        if matching_smallest:
-            for i in matching_smallest:
-                candidate = label_candidates[i]
-                label_candidates[i] = (
-                    candidate[0], candidate[1], "#7b1fa2", candidate[3], candidate[4]
-                )
-                smallest_times.append(candidate[0])
-        else:
-            is_upper = smallest_value > 0
+    smallest_is_distinct = (
+        smallest_value is not None
+        and (smallest_series, smallest_index) != (highest_series, highest_index)
+    )
+    smallest_time = (
+        cluster_centers.get((smallest_series, smallest_index), smallest_time)
+        if smallest_value is not None else None
+    )
+    if smallest_is_distinct:
+        smallest_candidate_exists = any(
+            candidate[5] == smallest_series and smallest_index in candidate[6]
+            for candidate in label_candidates
+        )
+        if not smallest_candidate_exists:
             label_candidates.append((
-                smallest_time,
-                is_upper,
-                "#7b1fa2",
-                f"{smallest_value:,.0f}",
-                smallest_value,
+                smallest_time, smallest_value > 0, "#d62728",
+                f"{smallest_value:,.0f}", smallest_value,
+                smallest_series, (smallest_index,),
             ))
-            smallest_times.append(smallest_time)
+        smallest_times = [smallest_time]
+    else:
+        smallest_times = []
 
     smallest_clip_marker.set_data(
         smallest_times,
@@ -426,7 +449,7 @@ def refresh_capped_plot():
         except RuntimeError:
             pass
 
-    for label_time, is_upper, color, label, peak_value in sorted(
+    for label_time, is_upper, color, label, peak_value, series_index, group in sorted(
         label_candidates, key=lambda item: mdates.date2num(item[0])
     ):
         x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
@@ -469,7 +492,17 @@ def refresh_capped_plot():
             textcoords="offset points",
             ha="center",
             va="top" if is_upper else "bottom",
-            color="#d62728" if highest_value is not None and peak_value == highest_value else color,
+            color=(
+                "#d62728"
+                if (
+                    series_index == highest_series and highest_index in group
+                ) or (
+                    smallest_is_distinct
+                    and series_index == smallest_series
+                    and smallest_index in group
+                )
+                else color
+            ),
             fontsize=8,
             fontweight="bold",
             bbox={
@@ -610,8 +643,7 @@ start_time = time.monotonic()
 
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
-ax.plot([], [], linestyle="none", marker="v", color="#7b1fa2", markersize=10, label="Smallest clipped value")
-ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Largest clipped value")
+ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Clipped extremes")
 ax.legend(loc="upper right")
 
 
