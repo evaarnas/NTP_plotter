@@ -184,6 +184,11 @@ highest_clip_marker, = ax.plot(
     markeredgecolor="white", markeredgewidth=1.0, markersize=16,
     zorder=3, label="_nolegend_",
 )
+smallest_clip_marker, = ax.plot(
+    [], [], linestyle="none", marker="v", color="#7b1fa2",
+    markeredgecolor="white", markeredgewidth=0.8, markersize=12,
+    zorder=3, label="_nolegend_",
+)
 clip_annotations = []
 CLIP_WINDOW_SECONDS = 5 * 60
 INITIAL_CLIP_CAP_MS = 500.0
@@ -330,9 +335,14 @@ def refresh_capped_plot():
     if clipped_points:
         highest_value, _ = max(clipped_points, key=lambda point: abs(point[0]))
         highest_clip_marker.set_marker("^" if highest_value > 0 else "v")
+        smallest_value, smallest_time = min(clipped_points, key=lambda point: point[0])
+        smallest_clip_marker.set_marker("^" if smallest_value > 0 else "v")
     else:
         highest_value = None
+        smallest_value = None
+        smallest_time = None
         highest_clip_marker.set_data([], [])
+        smallest_clip_marker.set_data([], [])
 
     for annotation in clip_annotations:
         annotation.remove()
@@ -376,6 +386,36 @@ def refresh_capped_plot():
         highlighted_times,
         [(cap if highest_value > 0 else -cap)] * len(highlighted_times)
         if highlighted_times else [],
+    )
+
+    smallest_times = []
+    if smallest_value is not None and smallest_value != highest_value:
+        matching_smallest = [
+            i for i, candidate in enumerate(label_candidates)
+            if candidate[4] == smallest_value
+        ]
+        if matching_smallest:
+            for i in matching_smallest:
+                candidate = label_candidates[i]
+                label_candidates[i] = (
+                    candidate[0], candidate[1], "#7b1fa2", candidate[3], candidate[4]
+                )
+                smallest_times.append(candidate[0])
+        else:
+            is_upper = smallest_value > 0
+            label_candidates.append((
+                smallest_time,
+                is_upper,
+                "#7b1fa2",
+                f"{smallest_value:,.0f}",
+                smallest_value,
+            ))
+            smallest_times.append(smallest_time)
+
+    smallest_clip_marker.set_data(
+        smallest_times,
+        [(cap if smallest_value > 0 else -cap)] * len(smallest_times)
+        if smallest_times else [],
     )
 
     legend_bbox = None
@@ -570,6 +610,7 @@ start_time = time.monotonic()
 
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
+ax.plot([], [], linestyle="none", marker="v", color="#7b1fa2", markersize=10, label="Smallest clipped value")
 ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Largest clipped value")
 ax.legend(loc="upper right")
 
