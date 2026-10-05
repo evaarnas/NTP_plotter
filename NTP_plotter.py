@@ -208,13 +208,14 @@ def start_new_segment():
 
     times = []
     offsets = []
+    monotonic_times = []
 
     # Mark samples so a newly started segment is visible immediately, even
     # before it has enough points to form a line.
     label = "NTP offset" if not segments else "_nolegend_"
     line, = ax.plot([], [], color="#1f77b4", marker=".", markersize=4, label=label)
 
-    current_segment = [times, offsets, line]
+    current_segment = [times, offsets, line, monotonic_times]
     segments.append(current_segment)
 
 
@@ -225,9 +226,53 @@ def clamp_values(values, cap):
     ]
 
 
+def merge_time_buckets(times, values, monotonic_times, bucket_seconds, cap=None):
+    """Return one real display sample per bucket; leave source data intact."""
+    if not times:
+        return [], []
+
+    origin = monotonic_times[0]
+    buckets = {}
+    for plot_time, value, sampled_at in zip(times, values, monotonic_times):
+        bucket = int((sampled_at - origin) / bucket_seconds)
+        buckets.setdefault(bucket, []).append((plot_time, value))
+
+    merged_times = []
+    merged_values = []
+    for bucket in sorted(buckets):
+        points = buckets[bucket]
+        values_in_bucket = [point[1] for point in points]
+        # Retain the latest actual sample; any failure in the bucket stays visible.
+        if any(not math.isfinite(value) for value in values_in_bucket):
+            merged_times.append(points[-1][0])
+            display_value = math.nan
+        else:
+            merged_times.append(points[-1][0])
+            display_value = points[-1][1]
+            if cap is not None:
+                display_value = min(cap, max(-cap, display_value))
+        merged_values.append(display_value)
+    return merged_times, merged_values
+
+
+def merge_clipped_markers(times, values, monotonic_times, bucket_seconds, cap, upper):
+    buckets = {}
+    for plot_time, value, sampled_at in zip(times, values, monotonic_times):
+        clipped = value > cap if upper else value < -cap
+        if math.isfinite(value) and clipped:
+            bucket = int((sampled_at - monotonic_times[0]) / bucket_seconds)
+            buckets.setdefault(bucket, []).append((plot_time, value))
+    return [
+        max(points, key=lambda point: point[1])[0]
+        if upper else min(points, key=lambda point: point[1])[0]
+        for _, points in sorted(buckets.items())
+    ]
+
+
 def refresh_capped_plot():
     """Apply one rolling cap to all three series while retaining raw values."""
     now = time.monotonic()
+    display_bucket_seconds = get_sampling_interval(now - start_time)
     recent_indices = [
         i for i, sampled_at in enumerate(sample_monotonic_times)
         if now - sampled_at <= CLIP_WINDOW_SECONDS
@@ -253,10 +298,19 @@ def refresh_capped_plot():
     )
 
     # Draw every line using clipped copies; the raw series remain untouched.
-    for times, values, line in segments:
-        line.set_data(times, clamp_values(values, cap))
-    delay_line.set_data(delay_times, clamp_values(delay_values, cap))
-    rtt_line.set_data(rtt_times, clamp_values(rtt_values, cap))
+    for times, values, line, monotonic_times in segments:
+        merged_times, merged_values = merge_time_buckets(
+            times, values, monotonic_times, display_bucket_seconds, cap
+        )
+        line.set_data(merged_times, merged_values)
+    merged_delay_times, merged_delay_values = merge_time_buckets(
+        delay_times, delay_values, sample_monotonic_times, display_bucket_seconds, cap
+    )
+    delay_line.set_data(merged_delay_times, merged_delay_values)
+    merged_rtt_times, merged_rtt_values = merge_time_buckets(
+        rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds, cap
+    )
+    rtt_line.set_data(merged_rtt_times, merged_rtt_values)
 
     series_for_markers = (
         (offset_times, offset_values, offset_clip_up, offset_clip_down),
@@ -266,8 +320,13 @@ def refresh_capped_plot():
     visible_values = []
     clipped_points = []
     for times, values, upper_markers, lower_markers in series_for_markers:
-        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
-        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
+        monotonic_times = sample_monotonic_times
+        upper_times = merge_clipped_markers(
+            times, values, monotonic_times, display_bucket_seconds, cap, upper=True
+        )
+        lower_times = merge_clipped_markers(
+            times, values, monotonic_times, display_bucket_seconds, cap, upper=False
+        )
         upper_markers.set_data(upper_times, [cap] * len(upper_times))
         lower_markers.set_data(lower_times, [-cap] * len(lower_times))
         visible_values.extend(clamp_values(values, cap))
@@ -603,6 +662,7 @@ while running:
 
         current_segment[0].append(plot_time)
         current_segment[1].append(offset)
+        current_segment[3].append(monotonic_end)
         offset_times.append(plot_time)
         offset_values.append(offset)
         delay_times.append(plot_time)
@@ -640,6 +700,7 @@ while running:
         # NaN breaks the line at this sample, making the outage visible.
         current_segment[0].append(failure_time)
         current_segment[1].append(math.nan)
+        current_segment[3].append(monotonic_end)
         offset_times.append(failure_time)
         offset_values.append(math.nan)
 
