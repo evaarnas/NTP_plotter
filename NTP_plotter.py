@@ -226,7 +226,7 @@ def clamp_values(values, cap):
     ]
 
 
-def merge_time_buckets(times, values, monotonic_times, bucket_seconds, cap=None):
+def merge_time_buckets(times, values, monotonic_times, bucket_seconds):
     """Return one real display sample per bucket; leave source data intact."""
     if not times:
         return [], []
@@ -245,28 +245,12 @@ def merge_time_buckets(times, values, monotonic_times, bucket_seconds, cap=None)
         # Retain the latest actual sample; any failure in the bucket stays visible.
         if any(not math.isfinite(value) for value in values_in_bucket):
             merged_times.append(points[-1][0])
-            display_value = math.nan
+            merged_value = math.nan
         else:
             merged_times.append(points[-1][0])
-            display_value = points[-1][1]
-            if cap is not None:
-                display_value = min(cap, max(-cap, display_value))
-        merged_values.append(display_value)
+            merged_value = points[-1][1]
+        merged_values.append(merged_value)
     return merged_times, merged_values
-
-
-def merge_clipped_markers(times, values, monotonic_times, bucket_seconds, cap, upper):
-    buckets = {}
-    for plot_time, value, sampled_at in zip(times, values, monotonic_times):
-        clipped = value > cap if upper else value < -cap
-        if math.isfinite(value) and clipped:
-            bucket = int((sampled_at - monotonic_times[0]) / bucket_seconds)
-            buckets.setdefault(bucket, []).append((plot_time, value))
-    return [
-        max(points, key=lambda point: point[1])[0]
-        if upper else min(points, key=lambda point: point[1])[0]
-        for _, points in sorted(buckets.items())
-    ]
 
 
 def refresh_capped_plot():
@@ -298,35 +282,34 @@ def refresh_capped_plot():
     )
 
     # Draw every line using clipped copies; the raw series remain untouched.
+    display_offset_times = []
+    display_offset_values = []
     for times, values, line, monotonic_times in segments:
         merged_times, merged_values = merge_time_buckets(
-            times, values, monotonic_times, display_bucket_seconds, cap
+            times, values, monotonic_times, display_bucket_seconds
         )
-        line.set_data(merged_times, merged_values)
+        line.set_data(merged_times, clamp_values(merged_values, cap))
+        display_offset_times.extend(merged_times)
+        display_offset_values.extend(merged_values)
     merged_delay_times, merged_delay_values = merge_time_buckets(
-        delay_times, delay_values, sample_monotonic_times, display_bucket_seconds, cap
+        delay_times, delay_values, sample_monotonic_times, display_bucket_seconds
     )
-    delay_line.set_data(merged_delay_times, merged_delay_values)
+    delay_line.set_data(merged_delay_times, clamp_values(merged_delay_values, cap))
     merged_rtt_times, merged_rtt_values = merge_time_buckets(
-        rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds, cap
+        rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds
     )
-    rtt_line.set_data(merged_rtt_times, merged_rtt_values)
+    rtt_line.set_data(merged_rtt_times, clamp_values(merged_rtt_values, cap))
 
     series_for_markers = (
-        (offset_times, offset_values, offset_clip_up, offset_clip_down),
-        (delay_times, delay_values, delay_clip_up, delay_clip_down),
-        (rtt_times, rtt_values, rtt_clip_up, rtt_clip_down),
+        (display_offset_times, display_offset_values, offset_clip_up, offset_clip_down),
+        (merged_delay_times, merged_delay_values, delay_clip_up, delay_clip_down),
+        (merged_rtt_times, merged_rtt_values, rtt_clip_up, rtt_clip_down),
     )
     visible_values = []
     clipped_points = []
     for times, values, upper_markers, lower_markers in series_for_markers:
-        monotonic_times = sample_monotonic_times
-        upper_times = merge_clipped_markers(
-            times, values, monotonic_times, display_bucket_seconds, cap, upper=True
-        )
-        lower_times = merge_clipped_markers(
-            times, values, monotonic_times, display_bucket_seconds, cap, upper=False
-        )
+        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
+        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
         upper_markers.set_data(upper_times, [cap] * len(upper_times))
         lower_markers.set_data(lower_times, [-cap] * len(lower_times))
         visible_values.extend(clamp_values(values, cap))
@@ -360,9 +343,9 @@ def refresh_capped_plot():
     # its triangle (above it for a lower-bound clip).
     label_candidates = []
     for times, values, color in (
-        (offset_times, offset_values, "#1f77b4"),
-        (delay_times, delay_values, "#e67e22"),
-        (rtt_times, rtt_values, "#008b8b"),
+        (display_offset_times, display_offset_values, "#1f77b4"),
+        (merged_delay_times, merged_delay_values, "#e67e22"),
+        (merged_rtt_times, merged_rtt_values, "#008b8b"),
     ):
         for is_upper in (True, False):
             clipped_indices = [
