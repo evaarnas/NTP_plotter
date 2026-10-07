@@ -224,9 +224,11 @@ def start_new_segment():
     segments.append(current_segment)
 
 
-def clamp_values(values, cap):
+def clamp_values(values, upper_cap, lower_cap=None):
+    if lower_cap is None:
+        lower_cap = upper_cap
     return [
-        min(cap, max(-cap, value)) if math.isfinite(value) else math.nan
+        min(upper_cap, max(-lower_cap, value)) if math.isfinite(value) else math.nan
         for value in values
     ]
 
@@ -259,7 +261,7 @@ def merge_time_buckets(times, values, monotonic_times, bucket_seconds):
 
 
 def refresh_capped_plot():
-    """Apply one rolling cap to all three series while retaining raw values."""
+    """Apply one latency-based rolling cap to all three series."""
     now = time.monotonic()
     display_bucket_seconds = get_sampling_interval(now - start_time)
     recent_indices = [
@@ -267,23 +269,28 @@ def refresh_capped_plot():
         if now - sampled_at <= CLIP_WINDOW_SECONDS
     ]
 
-    recent_values = []
+    recent_latency_values = []
     if recent_indices:
         for i in recent_indices:
-            for series in (offset_values, delay_values, rtt_values):
+            # Keep clock-offset steps from expanding the cap until the
+            # excursions themselves stop being clipped. Latency series set
+            # the readable scale; all three plotted series still share it.
+            for series in (delay_values, rtt_values):
                 value = series[i]
                 if math.isfinite(value):
-                    recent_values.append(abs(value))
+                    recent_latency_values.append(abs(value))
 
-    if not recent_values:
+    if not recent_latency_values:
         cap = INITIAL_CLIP_CAP_MS
     else:
-        recent_values.sort()
-        percentile_index = int((CAP_PERCENTILE / 100) * (len(recent_values) - 1))
-        cap = max(1.0, recent_values[percentile_index] * CAP_HEADROOM_MULTIPLIER)
+        recent_latency_values.sort()
+        index = int((CAP_PERCENTILE / 100) * (len(recent_latency_values) - 1))
+        cap = max(1.0, recent_latency_values[index] * CAP_HEADROOM_MULTIPLIER)
+
+    upper_cap = lower_cap = cap
 
     cap_config_status.set_text(
-        f"Cap: {CAP_PERCENTILE:g}% × {CAP_HEADROOM_MULTIPLIER:g} = {cap:.0f} ms"
+        f"Cap: ±{cap:.0f} ms"
     )
 
     # Draw every line using clipped copies; the raw series remain untouched.
@@ -293,17 +300,17 @@ def refresh_capped_plot():
         merged_times, merged_values = merge_time_buckets(
             times, values, monotonic_times, display_bucket_seconds
         )
-        line.set_data(merged_times, clamp_values(merged_values, cap))
+        line.set_data(merged_times, clamp_values(merged_values, upper_cap, lower_cap))
         display_offset_times.extend(merged_times)
         display_offset_values.extend(merged_values)
     merged_delay_times, merged_delay_values = merge_time_buckets(
         delay_times, delay_values, sample_monotonic_times, display_bucket_seconds
     )
-    delay_line.set_data(merged_delay_times, clamp_values(merged_delay_values, cap))
+    delay_line.set_data(merged_delay_times, clamp_values(merged_delay_values, upper_cap, lower_cap))
     merged_rtt_times, merged_rtt_values = merge_time_buckets(
         rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds
     )
-    rtt_line.set_data(merged_rtt_times, clamp_values(merged_rtt_values, cap))
+    rtt_line.set_data(merged_rtt_times, clamp_values(merged_rtt_values, upper_cap, lower_cap))
 
     series_for_markers = (
         (display_offset_times, display_offset_values, offset_clip_up, offset_clip_down),
@@ -313,20 +320,20 @@ def refresh_capped_plot():
     visible_values = []
     clipped_points = []
     for series_index, (times, values, upper_markers, lower_markers) in enumerate(series_for_markers):
-        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > cap]
-        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -cap]
-        upper_markers.set_data(upper_times, [cap] * len(upper_times))
-        lower_markers.set_data(lower_times, [-cap] * len(lower_times))
-        visible_values.extend(clamp_values(values, cap))
+        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > upper_cap]
+        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -lower_cap]
+        upper_markers.set_data(upper_times, [upper_cap] * len(upper_times))
+        lower_markers.set_data(lower_times, [-lower_cap] * len(lower_times))
+        visible_values.extend(clamp_values(values, upper_cap, lower_cap))
         clipped_points.extend(
             (value, sampled_at, series_index, sample_index)
             for sample_index, (sampled_at, value) in enumerate(zip(times, values))
-            if math.isfinite(value) and abs(value) > cap
+            if math.isfinite(value) and (value > upper_cap or value < -lower_cap)
         )
 
     finite_visible = [value for value in visible_values if math.isfinite(value)]
     lower = min([0.0] + finite_visible)
-    top = cap * 1.08
+    top = upper_cap * 1.08
     bottom = lower - max(5.0, (top - lower) * 0.04)
     ax.relim()
     ax.autoscale_view(scalex=True, scaley=False)
@@ -368,7 +375,7 @@ def refresh_capped_plot():
         for is_upper in (True, False):
             clipped_indices = [
                 i for i, value in enumerate(values)
-                if math.isfinite(value) and (value > cap if is_upper else value < -cap)
+                if math.isfinite(value) and (value > upper_cap if is_upper else value < -lower_cap)
             ]
             groups = []
             for index in clipped_indices:
@@ -409,7 +416,7 @@ def refresh_capped_plot():
             ))
     highest_clip_marker.set_data(
         [highest_time] if highest_time is not None else [],
-        [cap if highest_value > 0 else -cap] if highest_time is not None else [],
+        [upper_cap if highest_value > 0 else -lower_cap] if highest_time is not None else [],
     )
 
     smallest_is_distinct = (
@@ -437,7 +444,7 @@ def refresh_capped_plot():
 
     smallest_clip_marker.set_data(
         smallest_times,
-        [(cap if smallest_value > 0 else -cap)] * len(smallest_times)
+        [(upper_cap if smallest_value > 0 else -lower_cap)] * len(smallest_times)
         if smallest_times else [],
     )
 
@@ -464,7 +471,7 @@ def refresh_capped_plot():
             )
             overlaps_legend = False
             if legend_bbox is not None:
-                anchor_y = ax.transData.transform((mdates.date2num(label_time), cap if is_upper else -cap))[1]
+                anchor_y = ax.transData.transform((mdates.date2num(label_time), upper_cap if is_upper else -lower_cap))[1]
                 offset_y = (-12 - row * 14) if is_upper else (10 + row * 14)
                 label_y = anchor_y + offset_y * fig.dpi / 72
                 label_height = 16
@@ -487,7 +494,7 @@ def refresh_capped_plot():
 
         annotation = ax.annotate(
             label,
-            xy=(label_time, cap if is_upper else -cap),
+            xy=(label_time, upper_cap if is_upper else -lower_cap),
             xytext=(0, (-12 - row * 14) if is_upper else (10 + row * 14)),
             textcoords="offset points",
             ha="center",
@@ -644,7 +651,7 @@ start_time = time.monotonic()
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
 ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Clipped extremes")
-ax.legend(loc="upper right")
+ax.legend(loc="upper right", framealpha=0.55)
 
 
 while running:
