@@ -192,6 +192,7 @@ smallest_clip_marker, = ax.plot(
 clip_annotations = []
 CLIP_WINDOW_SECONDS = 5 * 60
 INITIAL_CLIP_CAP_MS = 500.0
+UPPER_CAP_EXTRA_HEADROOM = 1.25
 
 
 def mark_event(event_time, label, color):
@@ -287,10 +288,11 @@ def refresh_capped_plot():
         index = int((CAP_PERCENTILE / 100) * (len(recent_latency_values) - 1))
         cap = max(1.0, recent_latency_values[index] * CAP_HEADROOM_MULTIPLIER)
 
-    upper_cap = lower_cap = cap
+    lower_cap = cap
+    upper_cap = cap * UPPER_CAP_EXTRA_HEADROOM
 
     cap_config_status.set_text(
-        f"Cap: ±{cap:.0f} ms"
+        f"Caps: +{upper_cap:.0f} / −{lower_cap:.0f} ms"
     )
 
     # Draw every line using clipped copies; the raw series remain untouched.
