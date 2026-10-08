@@ -179,14 +179,22 @@ delay_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#e67e22", 
 delay_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#e67e22", markersize=7)
 rtt_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#008b8b", markersize=7)
 rtt_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#008b8b", markersize=7)
-category_extreme_markers = [
-    ax.plot(
-        [], [], linestyle="none", marker="^", color="#d62728",
-        markeredgecolor="white", markeredgewidth=1.0, markersize=14,
-        zorder=3, label="_nolegend_",
+category_extreme_markers = {
+    (series_index, is_upper): ax.plot(
+        [],
+        [],
+        linestyle="none",
+        marker="^" if is_upper else "v",
+        color="#d62728",
+        markeredgecolor="white",
+        markeredgewidth=1.0,
+        markersize=14,
+        zorder=3,
+        label="_nolegend_",
     )[0]
-    for _ in range(3)
-]
+    for series_index in range(3)
+    for is_upper in (True, False)
+}
 clip_annotations = []
 INITIAL_CLIP_CAP_MS = 500.0
 UPPER_CAP_EXTRA_HEADROOM = 1.10
@@ -330,9 +338,9 @@ def refresh_capped_plot():
     )
 
     series_for_markers = (
-        (display_offset_times, display_offset_values, offset_clip_up, offset_clip_down),
-        (merged_delay_times, merged_delay_values, delay_clip_up, delay_clip_down),
-        (merged_rtt_times, merged_rtt_values, rtt_clip_up, rtt_clip_down),
+        (offset_times, offset_values, offset_clip_up, offset_clip_down),
+        (delay_times, delay_values, delay_clip_up, delay_clip_down),
+        (rtt_times, rtt_values, rtt_clip_up, rtt_clip_down),
     )
     visible_values = []
     clipped_points = []
@@ -361,9 +369,11 @@ def refresh_capped_plot():
     category_extremes = {}
     for point in clipped_points:
         value, _, series_index, _ = point
-        previous = category_extremes.get(series_index)
-        if previous is None or abs(value) > abs(previous[0]):
-            category_extremes[series_index] = point
+        is_upper = value > 0
+        key = (series_index, is_upper)
+        previous = category_extremes.get(key)
+        if previous is None or (value > previous[0] if is_upper else value < previous[0]):
+            category_extremes[key] = point
 
     for annotation in clip_annotations:
         annotation.remove()
@@ -375,9 +385,9 @@ def refresh_capped_plot():
     label_candidates = []
     cluster_centers = {}
     for series_index, (times, values, color) in enumerate((
-        (display_offset_times, display_offset_values, "#1f77b4"),
-        (merged_delay_times, merged_delay_values, "#e67e22"),
-        (merged_rtt_times, merged_rtt_values, "#008b8b"),
+        (offset_times, offset_values, "#1f77b4"),
+        (delay_times, delay_values, "#e67e22"),
+        (rtt_times, rtt_values, "#008b8b"),
     )):
         upper_cap, lower_cap = series_caps[series_index]
         for is_upper in (True, False):
@@ -406,31 +416,30 @@ def refresh_capped_plot():
 
     label_rows = {True: [], False: []}
 
-    for series_index, marker in enumerate(category_extreme_markers):
-        extreme = category_extremes.get(series_index)
+    for (series_index, is_upper), marker in category_extreme_markers.items():
+        extreme = category_extremes.get((series_index, is_upper))
         if extreme is None:
             marker.set_data([], [])
             continue
 
         value, sample_time, _, sample_index = extreme
-        label_time = cluster_centers.get((series_index, sample_index), sample_time)
         upper_cap, lower_cap = series_caps[series_index]
-        points_up = value > 0
-        marker.set_marker("^" if points_up else "v")
-        cap_y = upper_cap if points_up else -lower_cap
+        cap_y = upper_cap if is_upper else -lower_cap
         marker_y = triangle_center_y_for_tip(
-            label_time, cap_y, marker.get_markersize(), points_up
+            sample_time, cap_y, marker.get_markersize(), is_upper
         )
         marker.set_data(
-            [label_time],
+            [sample_time],
             [marker_y],
         )
+        label_time = cluster_centers.get((series_index, sample_index), sample_time)
         if not any(
             candidate[5] == series_index and sample_index in candidate[6]
+            and candidate[1] == is_upper
             for candidate in label_candidates
         ):
             label_candidates.append((
-                label_time, value > 0, "#d62728",
+                label_time, is_upper, "#d62728",
                 f"{value:,.0f}", value,
                 series_index, (sample_index,),
             ))
@@ -448,8 +457,8 @@ def refresh_capped_plot():
     ):
         upper_cap, lower_cap = series_caps[series_index]
         is_extreme = (
-            series_index in category_extremes
-            and category_extremes[series_index][3] in group
+            (series_index, is_upper) in category_extremes
+            and category_extremes[(series_index, is_upper)][3] in group
         )
         marker_clearance = 12 if is_extreme else 0
         x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
