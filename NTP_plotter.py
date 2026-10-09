@@ -291,8 +291,8 @@ def refresh_capped_plot():
             if i < len(values) and math.isfinite(values[i])
         ]
         for series_values, percentiles in (
-            (sorted(value for value in finite_values if value > 0), positive_percentiles),
-            (sorted(-value for value in finite_values if value < 0), negative_percentiles),
+            (sorted(max(value, 0.0) for value in finite_values), positive_percentiles),
+            (sorted(max(-value, 0.0) for value in finite_values), negative_percentiles),
         ):
             if series_values:
                 percentile_position = (CAP_PERCENTILE / 100) * (len(series_values) - 1)
