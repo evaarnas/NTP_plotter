@@ -666,7 +666,7 @@ start_time = time.monotonic()
 start_new_segment()
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
 ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Clipped extremes")
-ax.legend(loc="upper right", framealpha=0.55)
+ax.legend(loc="upper right", framealpha=0.8, facecolor="white", edgecolor="#d0d0d0")
 
 
 while running:
