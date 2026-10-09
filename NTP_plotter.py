@@ -282,30 +282,36 @@ def refresh_capped_plot():
     sample_indices = range(len(sample_monotonic_times))
 
     raw_series = (offset_values, delay_values, rtt_values)
-    series_percentiles = []
+    positive_percentiles = []
+    negative_percentiles = []
     for values in raw_series:
-        series_values = sorted(
-            abs(values[i])
+        finite_values = [
+            values[i]
             for i in sample_indices
             if i < len(values) and math.isfinite(values[i])
-        )
-        if series_values:
-            percentile_position = (CAP_PERCENTILE / 100) * (len(series_values) - 1)
-            lower_index = int(percentile_position)
-            upper_index = min(lower_index + 1, len(series_values) - 1)
-            fraction = percentile_position - lower_index
-            series_percentiles.append(
-                series_values[lower_index]
-                + fraction * (series_values[upper_index] - series_values[lower_index])
-            )
+        ]
+        for series_values, percentiles in (
+            (sorted(value for value in finite_values if value > 0), positive_percentiles),
+            (sorted(-value for value in finite_values if value < 0), negative_percentiles),
+        ):
+            if series_values:
+                percentile_position = (CAP_PERCENTILE / 100) * (len(series_values) - 1)
+                lower_index = int(percentile_position)
+                upper_index = min(lower_index + 1, len(series_values) - 1)
+                fraction = percentile_position - lower_index
+                percentiles.append(
+                    series_values[lower_index]
+                    + fraction * (series_values[upper_index] - series_values[lower_index])
+                )
 
-    if series_percentiles:
-        base_cap = max(1.0, max(series_percentiles) * CAP_HEADROOM_MULTIPLIER)
+    if positive_percentiles or negative_percentiles:
+        upper_base_cap = max(1.0, max(positive_percentiles, default=0.0) * CAP_HEADROOM_MULTIPLIER)
+        lower_cap = max(1.0, max(negative_percentiles, default=0.0) * CAP_HEADROOM_MULTIPLIER)
     else:
-        base_cap = INITIAL_CLIP_CAP_MS
+        upper_base_cap = INITIAL_CLIP_CAP_MS
+        lower_cap = INITIAL_CLIP_CAP_MS
 
-    lower_cap = base_cap
-    upper_cap = base_cap * UPPER_CAP_EXTRA_HEADROOM
+    upper_cap = upper_base_cap * UPPER_CAP_EXTRA_HEADROOM
     series_caps = [(upper_cap, lower_cap)] * 3
     cap_config_status.set_text(f"Caps: +{upper_cap:.0f} / −{lower_cap:.0f} ms")
 
