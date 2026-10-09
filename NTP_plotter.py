@@ -466,7 +466,7 @@ def refresh_capped_plot():
             (series_index, is_upper) in category_extremes
             and category_extremes[(series_index, is_upper)][3] in group
         )
-        marker_clearance = 12 if is_extreme else 0
+        marker_clearance = 12
         x_pixel = ax.transData.transform((mdates.date2num(label_time), 0))[0]
         # Reserve extra horizontal space so labels stack before their boxes touch.
         label_half_width = max(16, len(label) * 5)
@@ -481,8 +481,8 @@ def refresh_capped_plot():
             if legend_bbox is not None:
                 anchor_y = ax.transData.transform((mdates.date2num(label_time), upper_cap if is_upper else -lower_cap))[1]
                 offset_y = (
-                    (-12 - marker_clearance - row * 14)
-                    if is_upper else (10 + marker_clearance + row * 14)
+                    (-12 - marker_clearance - row * 12)
+                    if is_upper else (10 + marker_clearance + row * 12)
                 )
                 label_y = anchor_y + offset_y * fig.dpi / 72
                 label_height = 16
@@ -508,8 +508,8 @@ def refresh_capped_plot():
             xy=(label_time, upper_cap if is_upper else -lower_cap),
             xytext=(
                 0,
-                (-12 - marker_clearance - row * 14)
-                if is_upper else (10 + marker_clearance + row * 14),
+                (-12 - marker_clearance - row * 12)
+                if is_upper else (10 + marker_clearance + row * 12),
             ),
             textcoords="offset points",
             ha="center",
