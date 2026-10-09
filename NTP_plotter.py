@@ -512,6 +512,13 @@ def refresh_capped_plot():
                 if is_upper else (10 + marker_clearance + row * 12),
             ),
             textcoords="offset points",
+            arrowprops={
+                "arrowstyle": "-",
+                "color": color,
+                "linewidth": 0.8,
+                "shrinkA": 2,
+                "shrinkB": 2,
+            },
             ha="center",
             va="top" if is_upper else "bottom",
             color=(
