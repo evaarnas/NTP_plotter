@@ -526,7 +526,7 @@ def refresh_capped_plot():
                 "edgecolor": "none",
                 "alpha": 0.95,
             },
-            zorder=10,
+            zorder=11 if is_extreme else 10,
         )
         clip_annotations.append(annotation)
 
