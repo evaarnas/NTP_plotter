@@ -387,10 +387,29 @@ def refresh_capped_plot():
     clipped_points = []
     for series_index, (times, values, upper_markers, lower_markers) in enumerate(series_for_markers):
         upper_cap, lower_cap = series_caps[series_index]
-        upper_times = [t for t, value in zip(times, values) if math.isfinite(value) and value > upper_cap]
-        lower_times = [t for t, value in zip(times, values) if math.isfinite(value) and value < -lower_cap]
-        upper_markers.set_data(upper_times, [upper_cap] * len(upper_times))
-        lower_markers.set_data(lower_times, [-lower_cap] * len(lower_times))
+        upper_times = []
+        upper_marker_y = []
+        lower_times = []
+        lower_marker_y = []
+        for plot_time, value in zip(times, values):
+            if not math.isfinite(value):
+                continue
+            if value > upper_cap:
+                upper_times.append(plot_time)
+                upper_marker_y.append(
+                    triangle_center_y_for_tip(
+                        plot_time, upper_cap, upper_markers.get_markersize(), True
+                    )
+                )
+            elif value < -lower_cap:
+                lower_times.append(plot_time)
+                lower_marker_y.append(
+                    triangle_center_y_for_tip(
+                        plot_time, -lower_cap, lower_markers.get_markersize(), False
+                    )
+                )
+        upper_markers.set_data(upper_times, upper_marker_y)
+        lower_markers.set_data(lower_times, lower_marker_y)
         visible_values.extend(clamp_values(values, upper_cap, lower_cap))
         clipped_points.extend(
             (value, sampled_at, series_index, sample_index)
