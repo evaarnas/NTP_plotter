@@ -253,16 +253,19 @@ def triangle_center_y_for_tip(plot_time, cap_y, marker_size, points_up):
     return ax.transData.inverted().transform((x_pixel, center_pixel))[1]
 
 
-def merge_time_buckets(times, values, monotonic_times, bucket_seconds):
+def merge_time_buckets(
+    times, values, monotonic_times, bucket_seconds, preserve_monotonic_times=()
+):
     """Return one real display sample per bucket; leave source data intact."""
     if not times:
         return [], []
 
     origin = monotonic_times[0]
     buckets = {}
+    preserved_times = set(preserve_monotonic_times)
     for plot_time, value, sampled_at in zip(times, values, monotonic_times):
         bucket = int((sampled_at - origin) / bucket_seconds)
-        buckets.setdefault(bucket, []).append((plot_time, value))
+        buckets.setdefault(bucket, []).append((plot_time, value, sampled_at))
 
     merged_times = []
     merged_values = []
@@ -271,12 +274,17 @@ def merge_time_buckets(times, values, monotonic_times, bucket_seconds):
         values_in_bucket = [point[1] for point in points]
         # Retain the latest actual sample; any failure in the bucket stays visible.
         if any(not math.isfinite(value) for value in values_in_bucket):
-            merged_times.append(points[-1][0])
-            merged_value = math.nan
+            selected_points = [(points[-1][0], math.nan, points[-1][2])]
         else:
-            merged_times.append(points[-1][0])
-            merged_value = points[-1][1]
-        merged_values.append(merged_value)
+            selected_points = [points[-1]]
+            selected_points.extend(
+                point for point in points
+                if point[2] in preserved_times and point[2] != selected_points[0][2]
+            )
+        selected_points.sort(key=lambda point: point[2])
+        for plot_time, value, _ in selected_points:
+            merged_times.append(plot_time)
+            merged_values.append(value)
     return merged_times, merged_values
 
 
@@ -320,12 +328,32 @@ def refresh_capped_plot():
     series_caps = [(upper_cap, lower_cap)] * 3
     cap_config_status.set_text(f"Caps: +{upper_cap:.0f} / −{lower_cap:.0f} ms")
 
+    preserve_monotonic_times = set()
+    for values, (upper_series_cap, lower_series_cap) in zip(raw_series, series_caps):
+        clipped_by_direction = ([], [])
+        for value, sampled_at in zip(values, sample_monotonic_times):
+            if not math.isfinite(value):
+                continue
+            if value > upper_series_cap:
+                clipped_by_direction[0].append((value, sampled_at))
+            elif value < -lower_series_cap:
+                clipped_by_direction[1].append((value, sampled_at))
+        if clipped_by_direction[0]:
+            preserve_monotonic_times.add(
+                max(clipped_by_direction[0], key=lambda point: point[0])[1]
+            )
+        if clipped_by_direction[1]:
+            preserve_monotonic_times.add(
+                min(clipped_by_direction[1], key=lambda point: point[0])[1]
+            )
+
     # Draw every line using clipped copies; the raw series remain untouched.
     display_offset_times = []
     display_offset_values = []
     for times, values, line, monotonic_times in segments:
         merged_times, merged_values = merge_time_buckets(
-            times, values, monotonic_times, display_bucket_seconds
+            times, values, monotonic_times, display_bucket_seconds,
+            preserve_monotonic_times,
         )
         line.set_data(
             merged_times,
@@ -334,14 +362,16 @@ def refresh_capped_plot():
         display_offset_times.extend(merged_times)
         display_offset_values.extend(merged_values)
     merged_delay_times, merged_delay_values = merge_time_buckets(
-        delay_times, delay_values, sample_monotonic_times, display_bucket_seconds
+        delay_times, delay_values, sample_monotonic_times, display_bucket_seconds,
+        preserve_monotonic_times,
     )
     delay_line.set_data(
         merged_delay_times,
         clamp_values(merged_delay_values, *series_caps[1]),
     )
     merged_rtt_times, merged_rtt_values = merge_time_buckets(
-        rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds
+        rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds,
+        preserve_monotonic_times,
     )
     rtt_line.set_data(
         merged_rtt_times,
@@ -517,13 +547,6 @@ def refresh_capped_plot():
                 if is_upper else (10 + marker_clearance + row * 12),
             ),
             textcoords="offset points",
-            arrowprops={
-                "arrowstyle": "-",
-                "color": color,
-                "linewidth": 0.8,
-                "shrinkA": 2,
-                "shrinkB": 2,
-            },
             ha="center",
             va="top" if is_upper else "bottom",
             color=(
