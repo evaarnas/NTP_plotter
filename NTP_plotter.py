@@ -165,6 +165,7 @@ delay_values = []
 delay_line, = ax.plot(
     [], [], color="#e67e22", marker=".", markersize=4,
     label="Approx. command duration",
+    zorder=1,
 )
 rtt_times = []
 rtt_values = []
@@ -172,6 +173,7 @@ sample_monotonic_times = []
 rtt_line, = ax.plot(
     [], [], color="#008b8b", marker=".", markersize=4,
     label="Packet-level UDP NTP RTT",
+    zorder=1,
 )
 offset_clip_up, = ax.plot([], [], linestyle="none", marker="^", color="#1f77b4", markersize=7)
 offset_clip_down, = ax.plot([], [], linestyle="none", marker="v", color="#1f77b4", markersize=7)
@@ -224,7 +226,10 @@ def start_new_segment():
     # Mark samples so a newly started segment is visible immediately, even
     # before it has enough points to form a line.
     label = "NTP offset" if not segments else "_nolegend_"
-    line, = ax.plot([], [], color="#1f77b4", marker=".", markersize=4, label=label)
+    line, = ax.plot(
+        [], [], color="#1f77b4", marker=".", markersize=4, label=label,
+        zorder=1,
+    )
 
     current_segment = [times, offsets, line, monotonic_times]
     segments.append(current_segment)
@@ -531,9 +536,9 @@ def refresh_capped_plot():
                 "boxstyle": "round,pad=0.15",
                 "facecolor": "white",
                 "edgecolor": "none",
-                "alpha": 0.95,
+                "alpha": 1.0,
             },
-            zorder=11 if is_extreme else 10,
+            zorder=21 if is_extreme else 20,
         )
         clip_annotations.append(annotation)
 
