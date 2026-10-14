@@ -34,7 +34,10 @@ py .\NTP_plotter.py
 
 The plot window updates as samples arrive. Close the window to stop sampling.
 Measurements and connection errors are also printed to the console. The program
-does not currently save or export samples.
+saves measurements in `ntp_plot_history.jsonl` next to the script and reloads
+them when it starts. Click **Reset history** to clear the displayed data and
+remove the saved history. Only one instance can run at a time; starting a second
+one shows an error dialog and exits.
 
 ## Plot and sampling
 

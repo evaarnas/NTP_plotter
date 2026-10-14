@@ -1,5 +1,10 @@
 import subprocess
+import ctypes
+import json
+import msvcrt
+import os
 import re
+import sys
 import time
 import math
 import socket
@@ -121,6 +126,35 @@ def get_packet_rtt(server):
         return None, str(e)
 
 
+LOCK_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "ntp_plotter.lock",
+)
+
+
+def acquire_instance_lock():
+    """Hold an exclusive OS lock; Windows releases it if the process dies."""
+    lock_handle = open(LOCK_FILE, "a+b")
+    try:
+        lock_handle.seek(0)
+        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        lock_handle.close()
+        message = (
+            "NTP Plotter is already running.\n\n"
+            "Running two instances would mix their samples in the shared "
+            "history file. Close the other instance first."
+        )
+        print(message)
+        ctypes.windll.user32.MessageBoxW(
+            None, message, "NTP Plotter", 0x10  # MB_ICONERROR
+        )
+        sys.exit(1)
+    return lock_handle
+
+
+instance_lock = acquire_instance_lock()
+
 plt.ion()
 
 fig, ax = plt.subplots()
@@ -198,13 +232,87 @@ category_extreme_markers = {
     for is_upper in (True, False)
 }
 clip_annotations = []
+history_event_artists = []
 INITIAL_CLIP_CAP_MS = 500.0
 UPPER_CAP_EXTRA_HEADROOM = 1.10
 
 
+HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "ntp_plot_history.jsonl",
+)
+
+
+def load_history():
+    records = []
+    try:
+        history_file = open(HISTORY_FILE, "r", encoding="utf-8")
+    except FileNotFoundError:
+        return records
+
+    with history_file:
+        for line_number, line in enumerate(history_file, start=1):
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("record must be a JSON object")
+                sample_time = datetime.fromisoformat(record["timestamp"])
+                segment = record["segment"]
+                if not isinstance(segment, int) or segment < 0:
+                    raise ValueError("segment must be a non-negative integer")
+
+                def load_value(name):
+                    value = record[name]
+                    if value is None:
+                        return math.nan
+                    if isinstance(value, (int, float)) and math.isfinite(value):
+                        return float(value)
+                    raise ValueError(f"{name} must be a finite number or null")
+
+                events = record.get("events", [])
+                if not isinstance(events, list) or any(
+                    not isinstance(event, dict)
+                    or not isinstance(event.get("label"), str)
+                    or not isinstance(event.get("color"), str)
+                    for event in events
+                ):
+                    raise ValueError("events must contain label and color strings")
+
+                records.append({
+                    "timestamp": sample_time,
+                    "offset": load_value("offset_ms"),
+                    "delay": load_value("delay_ms"),
+                    "rtt": load_value("rtt_ms"),
+                    "segment": segment,
+                    "events": events,
+                })
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid saved measurement at {HISTORY_FILE}:{line_number}: {error}"
+                ) from error
+    return records
+
+
+def save_measurement(sample_time, offset, delay, rtt, segment, events=()):
+    def save_value(value):
+        return value if value is not None and math.isfinite(value) else None
+
+    record = {
+        "timestamp": sample_time.isoformat(),
+        "offset_ms": save_value(offset),
+        "delay_ms": save_value(delay),
+        "rtt_ms": save_value(rtt),
+        "segment": segment,
+        "events": events,
+    }
+    with open(HISTORY_FILE, "a", encoding="utf-8") as history_file:
+        json.dump(record, history_file, allow_nan=False)
+        history_file.write("\n")
+
+
 def mark_event(event_time, label, color):
-    ax.axvline(event_time, color=color, alpha=0.8, linewidth=1.2)
-    ax.annotate(
+    event_line = ax.axvline(event_time, color=color, alpha=0.8, linewidth=1.2)
+    annotation = ax.annotate(
         label,
         xy=(event_time, 0.86),
         xycoords=("data", "axes fraction"),
@@ -214,6 +322,31 @@ def mark_event(event_time, label, color):
         color=color,
         fontsize=8,
     )
+    history_event_artists.extend((event_line, annotation))
+
+
+def mark_failure(event_time):
+    failure_line = ax.axvline(
+        event_time,
+        color="#c62828",
+        alpha=0.2,
+        linewidth=1,
+    )
+    annotation = ax.annotate(
+        "FAILED",
+        xy=(event_time, 0.92),
+        xycoords=("data", "axes fraction"),
+        ha="center",
+        va="top",
+        color="white",
+        fontsize=8,
+        bbox={
+            "boxstyle": "round,pad=0.25",
+            "facecolor": "#c62828",
+            "edgecolor": "none",
+        },
+    )
+    history_event_artists.extend((failure_line, annotation))
 
 
 def start_new_segment():
@@ -616,6 +749,7 @@ headroom_text = TextBox(
     initial=str(CAP_HEADROOM_MULTIPLIER),
 )
 apply_cap_button = Button(fig.add_axes([0.46, 0.05, 0.08, 0.05]), "Apply")
+reset_history_button = Button(fig.add_axes([0.56, 0.05, 0.10, 0.05]), "Reset history")
 percentile_label = fig.text(0, 0, "Percentile (%)", ha="right", va="center", fontsize=9)
 headroom_label = fig.text(0, 0, "Headroom ×", ha="right", va="center", fontsize=9)
 cap_config_status = fig.text(
@@ -632,9 +766,12 @@ def layout_cap_controls(event=None):
     """Keep widget boxes at fixed pixel dimensions as the window is resized."""
     width_px, height_px = fig.canvas.get_width_height()
     percentile_width, headroom_width = 100, 100
-    button_width, status_width = 70, 250
+    button_width, reset_width, status_width = 70, 100, 190
     control_height, bottom_px = 34, 18
-    total_width = 88 + 8 + percentile_width + 18 + 72 + 8 + headroom_width + 14 + button_width + 14 + status_width
+    total_width = (
+        88 + 8 + percentile_width + 18 + 72 + 8 + headroom_width + 14
+        + button_width + 14 + reset_width + 14 + status_width
+    )
     x_px = max(8, (width_px - total_width) / 2)
 
     center_y = (bottom_px + control_height / 2) / height_px
@@ -649,6 +786,8 @@ def layout_cap_controls(event=None):
     apply_cap_button.ax.set_position([x_px / width_px, bottom_px / height_px, button_width / width_px, control_height / height_px])
     x_px += button_width + 14
     cap_config_status.set_position((x_px / width_px, (bottom_px + control_height / 2) / height_px))
+    x_px += status_width + 14
+    reset_history_button.ax.set_position([x_px / width_px, bottom_px / height_px, reset_width / width_px, control_height / height_px])
 
 
 def mark_field_validity(text_box, valid):
@@ -700,20 +839,140 @@ def apply_cap_settings(event=None):
     fig.canvas.draw_idle()
 
 
+def reset_history(event=None):
+    global current_date, current_segment, previous_time
+    global was_connected, previous_wall_time, previous_monotonic_time, start_time
+
+    try:
+        os.remove(HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        message = f"History reset failed: {error}"
+        print(message)
+        status_indicator.set_text("History reset failed")
+        status_indicator.set_bbox({
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#c62828",
+            "edgecolor": "none",
+        })
+        fig.canvas.draw_idle()
+        return
+
+    for event_artist in history_event_artists:
+        event_artist.remove()
+    history_event_artists.clear()
+    for _, _, line, _ in segments:
+        line.remove()
+    segments.clear()
+
+    offset_times.clear()
+    offset_values.clear()
+    delay_times.clear()
+    delay_values.clear()
+    rtt_times.clear()
+    rtt_values.clear()
+    sample_monotonic_times.clear()
+    delay_line.set_data([], [])
+    rtt_line.set_data([], [])
+
+    current_date = datetime.now().date()
+    current_segment = None
+    previous_time = None
+    was_connected = None
+    previous_wall_time = None
+    previous_monotonic_time = None
+    start_time = time.monotonic()
+    start_new_segment()
+    ax.legend(loc="upper right", framealpha=0.8, facecolor="white", edgecolor="#d0d0d0")
+
+    status_indicator.set_text("History reset")
+    status_indicator.set_bbox({
+        "boxstyle": "round,pad=0.35",
+        "facecolor": "#666666",
+        "edgecolor": "none",
+    })
+    refresh_capped_plot()
+    fig.canvas.draw_idle()
+
+
 apply_cap_button.on_clicked(apply_cap_settings)
+reset_history_button.on_clicked(reset_history)
 percentile_text.on_submit(apply_cap_settings)
 headroom_text.on_submit(apply_cap_settings)
 layout_cap_controls()
 fig.canvas.mpl_connect("resize_event", layout_cap_controls)
 
-plt.show(block=False)
-
 start_time = time.monotonic()
 
-start_new_segment()
+history = load_history()
+if history:
+    history_elapsed = [0.0]
+    for previous, current in zip(history, history[1:]):
+        wall_delta = (current["timestamp"] - previous["timestamp"]).total_seconds()
+        history_elapsed.append(history_elapsed[-1] + max(0.001, wall_delta))
+    history_monotonic_start = time.monotonic() - history_elapsed[-1]
+
+    previous_segment = None
+    for record, elapsed in zip(history, history_elapsed):
+        if record["segment"] != previous_segment:
+            start_new_segment()
+            previous_segment = record["segment"]
+        plot_time = record["timestamp"]
+        current_segment[0].append(plot_time)
+        current_segment[1].append(record["offset"])
+        current_segment[3].append(history_monotonic_start + elapsed)
+        offset_times.append(plot_time)
+        offset_values.append(record["offset"])
+        delay_times.append(plot_time)
+        delay_values.append(record["delay"])
+        rtt_times.append(plot_time)
+        rtt_values.append(record["rtt"])
+        sample_monotonic_times.append(history_monotonic_start + elapsed)
+
+        if math.isfinite(record["offset"]):
+            for event in record["events"]:
+                mark_event(plot_time, event["label"], event["color"])
+        else:
+            mark_failure(plot_time)
+
+    latest_success = next(
+        (record for record in reversed(history) if math.isfinite(record["offset"])),
+        None,
+    )
+    current_date = history[-1]["timestamp"].date()
+    if latest_success is not None:
+        previous_time = datetime.strptime(
+            latest_success["timestamp"].strftime("%H:%M:%S"), "%H:%M:%S"
+        )
+    was_connected = math.isfinite(history[-1]["offset"])
+    if was_connected:
+        status_indicator.set_text("Connected")
+        status_indicator.set_bbox({
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#2e7d32",
+            "edgecolor": "none",
+        })
+    else:
+        status_indicator.set_text("Connection failed")
+        status_indicator.set_bbox({
+            "boxstyle": "round,pad=0.35",
+            "facecolor": "#c62828",
+            "edgecolor": "none",
+        })
+
+    print(f"Loaded {len(history)} saved measurements from {HISTORY_FILE}")
+else:
+    start_new_segment()
+
 ax.plot([], [], linestyle="none", marker="^", color="#555555", label="Value clipped at cap")
 ax.plot([], [], linestyle="none", marker="^", color="#d62728", markersize=12, label="Clipped extremes")
 ax.legend(loc="upper right", framealpha=0.8, facecolor="white", edgecolor="#d0d0d0")
+
+if history:
+    refresh_capped_plot()
+
+plt.show(block=False)
 
 
 while running:
@@ -740,6 +999,7 @@ while running:
     # --------------------------------------------------------------
 
     if sample_time is not None:
+        sample_events = []
 
         status_indicator.set_text("Connected")
         status_indicator.set_bbox({
@@ -771,17 +1031,20 @@ while running:
 
         if was_connected is False:
             mark_event(plot_time, "Reconnected", "#2e7d32")
+            sample_events.append({"label": "Reconnected", "color": "#2e7d32"})
 
         if previous_wall_time is not None:
             wall_delta = (wall_end - previous_wall_time).total_seconds()
             monotonic_delta = monotonic_end - previous_monotonic_time
             adjustment = wall_delta - monotonic_delta
             if abs(adjustment) >= 2.0:
+                event_label = f"System clock adjusted ({adjustment:+.1f}s)"
                 mark_event(
                     plot_time,
-                    f"System clock adjusted ({adjustment:+.1f}s)",
+                    event_label,
                     "#1565c0",
                 )
+                sample_events.append({"label": event_label, "color": "#1565c0"})
 
         was_connected = True
 
@@ -795,6 +1058,14 @@ while running:
         rtt_times.append(plot_time)
         rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
         sample_monotonic_times.append(monotonic_end)
+        save_measurement(
+            plot_time,
+            offset,
+            sample_duration * 1000,
+            packet_rtt_ms,
+            len(segments) - 1,
+            sample_events,
+        )
         refresh_capped_plot()
 
         fig.canvas.draw_idle()
@@ -829,32 +1100,20 @@ while running:
         offset_times.append(failure_time)
         offset_values.append(math.nan)
 
-        ax.axvline(
-            failure_time,
-            color="#c62828",
-            alpha=0.2,
-            linewidth=1,
-        )
-        ax.annotate(
-            "FAILED",
-            xy=(failure_time, 0.92),
-            xycoords=("data", "axes fraction"),
-            ha="center",
-            va="top",
-            color="white",
-            fontsize=8,
-            bbox={
-                "boxstyle": "round,pad=0.25",
-                "facecolor": "#c62828",
-                "edgecolor": "none",
-            },
-        )
+        mark_failure(failure_time)
 
         delay_times.append(failure_time)
         delay_values.append(sample_duration * 1000)
         rtt_times.append(failure_time)
         rtt_values.append(packet_rtt_ms if packet_rtt_ms is not None else math.nan)
         sample_monotonic_times.append(monotonic_end)
+        save_measurement(
+            failure_time,
+            None,
+            sample_duration * 1000,
+            packet_rtt_ms,
+            len(segments) - 1,
+        )
         refresh_capped_plot()
 
         fig.canvas.draw_idle()

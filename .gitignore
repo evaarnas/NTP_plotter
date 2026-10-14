@@ -1,1 +1,3 @@
 ﻿/*.log
+/ntp_plot_history.jsonl
+/ntp_plotter.lock
