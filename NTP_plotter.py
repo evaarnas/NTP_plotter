@@ -1,22 +1,36 @@
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import math
 import socket
 import struct
 from datetime import datetime, timedelta
+from tkinter import messagebox, ttk
 
+import matplotlib
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from matplotlib.widgets import TextBox, Button
-from tkinter import messagebox
 
 
 NTP_SERVER = "time.windows.com"
+OFFSET_METHOD = "udp"  # "udp" or "w32tm" (Windows only)
 CAP_PERCENTILE = 95.0
 CAP_HEADROOM_MULTIPLIER = 1.25
+
+if OFFSET_METHOD not in {"udp", "w32tm"}:
+    raise ValueError('OFFSET_METHOD must be "udp" or "w32tm"')
+if OFFSET_METHOD == "w32tm" and os.name != "nt":
+    messagebox.showerror(
+        "NTP Plotter",
+        'OFFSET_METHOD="w32tm" is only available on Windows.',
+    )
+    sys.exit(1)
 
 # (elapsed time in seconds, sampling interval in seconds)
 SAMPLING_SCHEDULE = [
@@ -38,7 +52,7 @@ def get_sampling_interval(elapsed):
     return 300
 
 
-def get_ntp_sample(server):
+def get_udp_ntp_sample(server):
     """Return (local_sample_time, offset_ms, error, round_trip_ms)."""
     ntp_epoch_delta = 2_208_988_800
     fraction_scale = 1 << 32
@@ -98,9 +112,10 @@ def get_ntp_sample(server):
                     last_error = "NTP server returned an empty timestamp"
                     continue
 
-                # NTP offset: server time minus local time, using the four
-                # timestamps defined in RFC 5905 section 8.
-                offset_ms = ((t2 - t1) + (t3 - t4)) * 500
+                # Match the sign convention used by the existing w32tm
+                # history: negate the RFC four-timestamp server-minus-local
+                # offset so the graph remains continuous when methods change.
+                offset_ms = -((t2 - t1) + (t3 - t4)) * 500
                 sample_time = datetime.fromtimestamp(t4)
                 return sample_time, offset_ms, None, rtt_ms
 
@@ -110,6 +125,31 @@ def get_ntp_sample(server):
         return None, None, last_error, None
     except OSError as e:
         return None, None, str(e), None
+
+
+def get_w32tm_sample(server):
+    """Return (sample_time, offset_ms, error) from Windows w32tm."""
+    try:
+        result = subprocess.run(
+            ["w32tm", "/stripchart", f"/computer:{server}", "/samples:1", "/dataonly"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        return None, None, str(error)
+
+    pattern = re.compile(r"(\d\d:\d\d:\d\d),\s*([+-]?\d+\.\d+)s")
+    for line in result.stdout.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            sample_time = datetime.strptime(match.group(1), "%H:%M:%S")
+            offset_ms = -float(match.group(2)) * 1000
+            return sample_time, offset_ms, None
+
+    error = result.stderr.strip() or result.stdout.strip()
+    if not error:
+        error = f"w32tm returned exit code {result.returncode}"
+    return None, None, error
 
 
 LOCK_FILE = os.path.join(
@@ -242,6 +282,7 @@ category_extreme_markers = {
 }
 clip_annotations = []
 history_event_artists = []
+pending_sample_events = []
 INITIAL_CLIP_CAP_MS = 500.0
 UPPER_CAP_EXTRA_HEADROOM = 1.10
 LONG_GAP_SECONDS = 10 * 60
@@ -855,6 +896,15 @@ apply_cap_button = Button(fig.add_axes([0.46, 0.05, 0.08, 0.05]), "Apply")
 reset_history_button = Button(fig.add_axes([0.56, 0.05, 0.10, 0.05]), "Reset history")
 percentile_label = fig.text(0, 0, "Percentile (%)", ha="right", va="center", fontsize=9)
 headroom_label = fig.text(0, 0, "Headroom ×", ha="right", va="center", fontsize=9)
+offset_method_label = fig.text(0, 0, "Offset method", ha="right", va="center", fontsize=9)
+offset_method_options = ["udp", "w32tm"] if os.name == "nt" else ["udp"]
+offset_method_combo = ttk.Combobox(
+    fig.canvas.get_tk_widget(),
+    values=offset_method_options,
+    state="readonly",
+    width=9,
+)
+offset_method_combo.set(OFFSET_METHOD)
 cap_config_status = fig.text(
     0.57,
     0.075,
@@ -868,12 +918,15 @@ cap_config_status = fig.text(
 def layout_cap_controls(event=None):
     """Keep widget boxes at fixed pixel dimensions as the window is resized."""
     width_px, height_px = fig.canvas.get_width_height()
+    canvas_widget = fig.canvas.get_tk_widget()
     percentile_width, headroom_width = 100, 100
     button_width, reset_width, status_width = 70, 100, 190
+    method_label_width, method_combo_width = 82, 100
     control_height, bottom_px = 34, 18
     total_width = (
         88 + 8 + percentile_width + 18 + 72 + 8 + headroom_width + 14
-        + button_width + 14 + reset_width + 14 + status_width
+        + button_width + 14 + status_width + 14 + method_label_width + 8
+        + method_combo_width + 14 + reset_width
     )
     x_px = max(8, (width_px - total_width) / 2)
 
@@ -890,7 +943,38 @@ def layout_cap_controls(event=None):
     x_px += button_width + 14
     cap_config_status.set_position((x_px / width_px, (bottom_px + control_height / 2) / height_px))
     x_px += status_width + 14
+    offset_method_label.set_position(((x_px + method_label_width) / width_px, center_y))
+    x_px += method_label_width + 8
+    offset_method_combo.place(
+        relx=x_px / width_px,
+        rely=1 - (bottom_px + control_height) / height_px,
+        relwidth=method_combo_width / width_px,
+        relheight=control_height / height_px,
+    )
+    x_px += method_combo_width + 14
     reset_history_button.ax.set_position([x_px / width_px, bottom_px / height_px, reset_width / width_px, control_height / height_px])
+
+
+def on_offset_method_changed(event=None):
+    global OFFSET_METHOD
+    selected_method = offset_method_combo.get()
+    if not selected_method or selected_method == OFFSET_METHOD:
+        return
+
+    OFFSET_METHOD = selected_method
+    if current_segment[0]:
+        start_new_segment()
+    pending_sample_events.append({
+        "label": f"Offset method: {selected_method}",
+        "color": "#9467bd",
+    })
+    status_indicator.set_text(f"Offset method: {selected_method}")
+    status_indicator.set_bbox({
+        "boxstyle": "round,pad=0.35",
+        "facecolor": "#666666",
+        "edgecolor": "none",
+    })
+    fig.canvas.draw_idle()
 
 
 def mark_field_validity(text_box, valid):
@@ -976,6 +1060,7 @@ def reset_history(event=None):
     rtt_times.clear()
     rtt_values.clear()
     sample_monotonic_times.clear()
+    pending_sample_events.clear()
     delay_line.set_data([], [])
     rtt_line.set_data([], [])
 
@@ -1001,6 +1086,7 @@ def reset_history(event=None):
 
 apply_cap_button.on_clicked(apply_cap_settings)
 reset_history_button.on_clicked(reset_history)
+offset_method_combo.bind("<<ComboboxSelected>>", on_offset_method_changed)
 percentile_text.on_submit(apply_cap_settings)
 headroom_text.on_submit(apply_cap_settings)
 layout_cap_controls()
@@ -1095,13 +1181,18 @@ while running:
 
     sample_start = time.monotonic()
 
-    sample_time, offset, error, packet_rtt_ms = get_ntp_sample(NTP_SERVER)
+    if OFFSET_METHOD == "w32tm":
+        sample_time, offset, error = get_w32tm_sample(NTP_SERVER)
+        _, _, packet_rtt_error, packet_rtt_ms = get_udp_ntp_sample(NTP_SERVER)
+    else:
+        sample_time, offset, error, packet_rtt_ms = get_udp_ntp_sample(NTP_SERVER)
+        packet_rtt_error = error
 
     sample_duration = time.monotonic() - sample_start
     if packet_rtt_ms is not None:
         packet_rtt_summary = f"packet RTT {packet_rtt_ms:.1f} ms"
     else:
-        packet_rtt_summary = f"packet RTT unavailable: {error}"
+        packet_rtt_summary = f"packet RTT unavailable: {packet_rtt_error}"
     wall_end = datetime.now()
     monotonic_end = time.monotonic()
 
@@ -1110,7 +1201,10 @@ while running:
     # --------------------------------------------------------------
 
     if sample_time is not None:
-        sample_events = []
+        sample_events = list(pending_sample_events)
+        pending_sample_events.clear()
+        for sample_event in sample_events:
+            mark_event(plot_time, sample_event["label"], sample_event["color"])
 
         status_indicator.set_text("Connected")
         status_indicator.set_bbox({

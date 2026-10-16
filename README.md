@@ -11,7 +11,8 @@ query duration, and packet round-trip time over time.
 - Matplotlib
 - Tkinter (usually included with desktop Python installations)
 - Network access to the configured NTP server:
-  - UDP traffic to port 123 must be allowed for NTP offset and RTT measurements.
+  - UDP traffic to port 123 must be allowed for RTT and for UDP-based offset measurements.
+  - The optional `w32tm` offset method requires Windows and a working `w32tm` command.
 
 ## Setup
 
@@ -52,9 +53,11 @@ one shows an error dialog and exits.
 
 The plot shows:
 
-- **NTP offset** — calculated in milliseconds from the local request and
-  response times and the server's receive and transmit timestamps in one NTP
-  exchange. Positive values mean the server clock is ahead of the local clock.
+- **NTP offset** — measured in milliseconds using the selected offset method.
+  The default UDP method uses the local request and response times and the
+  server's receive and transmit timestamps. UDP values use the same sign
+  convention as the existing `w32tm` history so switching methods does not
+  invert the plotted offset.
 - **Approx. NTP query duration** — elapsed time for the complete query,
   including address lookup and the UDP exchange.
 - **Packet-level UDP NTP RTT** — elapsed send-to-reply time for that same
@@ -91,5 +94,7 @@ broken across those gaps.
 ## Configure the NTP server
 
 Edit `NTP_SERVER` near the top of `NTP_plotter.py` to use a different server.
-The server is queried directly over UDP port 123 for both offset and RTT
-measurements.
+Choose **udp** or **w32tm** from the **Offset method** dropdown. The `w32tm`
+option is available only on Windows; other platforms offer **udp**. RTT is
+measured directly over UDP port 123 with either offset method. Changing the
+method starts a new plotted segment and marks the change on the graph.
