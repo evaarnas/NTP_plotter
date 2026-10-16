@@ -160,24 +160,26 @@ plt.ion()
 fig, ax = plt.subplots()
 fig.set_size_inches(12, 8)
 
-time_locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+time_locator = mdates.AutoDateLocator(minticks=4, maxticks=8)
+ax.xaxis.set_major_locator(time_locator)
 
 
 def format_time_tick(value, position):
-    tick_date = mdates.num2date(value).date()
-    label = mdates.num2date(value).strftime("%H:%M")
-    tick_locations = ax.get_xticks()
-    if (
+    tick_time = mdates.num2date(value)
+    tick_locations = ax.xaxis.get_majorticklocs()
+    date_changed = (
         position is None
         or position <= 0
         or position >= len(tick_locations)
-        or tick_date != mdates.num2date(tick_locations[position - 1]).date()
-    ):
-        label += f"\n{tick_date:%Y-%m-%d}"
+        or tick_time.date()
+        != mdates.num2date(tick_locations[int(position) - 1]).date()
+    )
+    label = tick_time.strftime("%H:%M")
+    if date_changed:
+        label += f"\n{tick_time:%Y-%m-%d}"
     return label
 
 
-ax.xaxis.set_major_locator(time_locator)
 ax.xaxis.set_major_formatter(FuncFormatter(format_time_tick))
 
 ax.set_ylabel("Offset / delay (ms)")
@@ -251,6 +253,8 @@ clip_annotations = []
 history_event_artists = []
 INITIAL_CLIP_CAP_MS = 500.0
 UPPER_CAP_EXTRA_HEADROOM = 1.10
+LONG_GAP_SECONDS = 10 * 60
+outage_artists = []
 
 
 HISTORY_FILE = os.path.join(
@@ -450,6 +454,75 @@ def merge_time_buckets(
     return merged_times, merged_values
 
 
+def break_lines_at_long_gaps(times, values):
+    """Insert NaNs so plotted lines do not imply data during long gaps."""
+    if not times:
+        return [], []
+
+    broken_times = [times[0]]
+    broken_values = [values[0]]
+    for previous_time, plot_time, value in zip(times, times[1:], values[1:]):
+        if (plot_time - previous_time).total_seconds() > LONG_GAP_SECONDS:
+            midpoint = previous_time + (plot_time - previous_time) / 2
+            broken_times.append(midpoint)
+            broken_values.append(math.nan)
+        broken_times.append(plot_time)
+        broken_values.append(value)
+    return broken_times, broken_values
+
+
+def format_gap_duration(seconds):
+    total_minutes = int(seconds // 60)
+    days, remainder_minutes = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remainder_minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def refresh_gap_markers():
+    for artist in outage_artists:
+        artist.remove()
+    outage_artists.clear()
+
+    gaps = []
+    for previous_time, current_time in zip(offset_times, offset_times[1:]):
+        duration = (current_time - previous_time).total_seconds()
+        if duration > LONG_GAP_SECONDS:
+            gaps.append((previous_time, current_time, duration))
+
+    for start_time, end_time, duration in gaps:
+        band = ax.axvspan(
+            start_time,
+            end_time,
+            color="#777777",
+            alpha=0.16,
+            zorder=0,
+        )
+        label = ax.annotate(
+            f"No samples\n{format_gap_duration(duration)}",
+            xy=(start_time + (end_time - start_time) / 2, 0.5),
+            xycoords=("data", "axes fraction"),
+            ha="center",
+            va="center",
+            fontsize=9,
+            color="#444444",
+            bbox={
+                "boxstyle": "round,pad=0.3",
+                "facecolor": "white",
+                "edgecolor": "#aaaaaa",
+                "alpha": 0.9,
+            },
+            zorder=4,
+        )
+        outage_artists.extend((band, label))
+
+
 def refresh_capped_plot():
     """Apply shared rolling caps derived from all plotted series."""
     now = time.monotonic()
@@ -517,6 +590,9 @@ def refresh_capped_plot():
             times, values, monotonic_times, display_bucket_seconds,
             preserve_monotonic_times,
         )
+        merged_times, merged_values = break_lines_at_long_gaps(
+            merged_times, merged_values
+        )
         line.set_data(
             merged_times,
             clamp_values(merged_values, *series_caps[0]),
@@ -527,6 +603,9 @@ def refresh_capped_plot():
         delay_times, delay_values, sample_monotonic_times, display_bucket_seconds,
         preserve_monotonic_times,
     )
+    merged_delay_times, merged_delay_values = break_lines_at_long_gaps(
+        merged_delay_times, merged_delay_values
+    )
     delay_line.set_data(
         merged_delay_times,
         clamp_values(merged_delay_values, *series_caps[1]),
@@ -534,6 +613,9 @@ def refresh_capped_plot():
     merged_rtt_times, merged_rtt_values = merge_time_buckets(
         rtt_times, rtt_values, sample_monotonic_times, display_bucket_seconds,
         preserve_monotonic_times,
+    )
+    merged_rtt_times, merged_rtt_values = break_lines_at_long_gaps(
+        merged_rtt_times, merged_rtt_values
     )
     rtt_line.set_data(
         merged_rtt_times,
@@ -586,6 +668,7 @@ def refresh_capped_plot():
     bottom = lower - max(5.0, (top - lower) * 0.04)
     ax.relim()
     ax.autoscale_view(scalex=True, scaley=False)
+    refresh_gap_markers()
     ax.set_ylim(bottom, top)
 
     category_extremes = {}
@@ -1037,26 +1120,20 @@ while running:
             "edgecolor": "none",
         })
 
-        # A time-of-day decrease can mean either midnight or a manual/system
-        # clock adjustment. Only treat a near-midnight rollover as a new day.
-        if previous_time is not None and sample_time < previous_time:
-            crossed_midnight = (
-                previous_time.hour >= 23
-                and sample_time.hour <= 1
-            )
-            if crossed_midnight:
-                current_date += timedelta(days=1)
-            # Start a fresh line for either kind of discontinuity. For a clock
-            # rollback, keep the date so the new samples plot at their actual
-            # earlier wall-clock times instead of being pushed into tomorrow.
+        # w32tm supplies the time of day only. Anchor it to the actual wall
+        # date, then choose the nearest date if the command crossed midnight.
+        plot_time = datetime.combine(wall_end.date(), sample_time.time())
+        if plot_time - wall_end > timedelta(hours=12):
+            plot_time -= timedelta(days=1)
+        elif wall_end - plot_time > timedelta(hours=12):
+            plot_time += timedelta(days=1)
+
+        # A backward system-clock adjustment should begin a separate line.
+        # A multi-day sampling gap no longer gets mistaken for a date rollover.
+        if offset_times and plot_time < offset_times[-1]:
             start_new_segment()
-
         previous_time = sample_time
-
-        plot_time = datetime.combine(
-            current_date,
-            sample_time.time()
-        )
+        current_date = plot_time.date()
 
         if was_connected is False:
             mark_event(plot_time, "Reconnected", "#2e7d32")
