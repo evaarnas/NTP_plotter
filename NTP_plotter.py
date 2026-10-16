@@ -1019,6 +1019,15 @@ start_time = time.monotonic()
 
 history = load_history()
 if history:
+    graph_start_time = min(record["timestamp"] for record in history)
+    graph_elapsed = max(
+        0.0,
+        (datetime.now() - graph_start_time).total_seconds(),
+    )
+    # Continue the sampling schedule from the persisted graph's age, including
+    # time spent offline, instead of restarting at the fastest interval.
+    start_time = time.monotonic() - graph_elapsed
+
     history_elapsed = [0.0]
     for previous, current in zip(history, history[1:]):
         wall_delta = (current["timestamp"] - previous["timestamp"]).total_seconds()
@@ -1244,7 +1253,7 @@ while running:
 
     print(
         f"Next sample in {interval}s "
-        f"(elapsed {elapsed / 60:.1f} min)"
+        f"(graph span {elapsed / 60:.1f} min)"
     )
 
     # --------------------------------------------------------------
