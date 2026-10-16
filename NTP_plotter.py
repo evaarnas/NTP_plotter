@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from matplotlib.widgets import TextBox, Button
 
 
@@ -160,9 +160,25 @@ plt.ion()
 fig, ax = plt.subplots()
 fig.set_size_inches(12, 8)
 
-ax.xaxis.set_major_formatter(
-    mdates.DateFormatter("%H:%M:%S")
-)
+time_locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+
+
+def format_time_tick(value, position):
+    tick_date = mdates.num2date(value).date()
+    label = mdates.num2date(value).strftime("%H:%M")
+    tick_locations = ax.get_xticks()
+    if (
+        position is None
+        or position <= 0
+        or position >= len(tick_locations)
+        or tick_date != mdates.num2date(tick_locations[position - 1]).date()
+    ):
+        label += f"\n{tick_date:%Y-%m-%d}"
+    return label
+
+
+ax.xaxis.set_major_locator(time_locator)
+ax.xaxis.set_major_formatter(FuncFormatter(format_time_tick))
 
 ax.set_ylabel("Offset / delay (ms)")
 ax.set_xlabel("Time")
@@ -180,8 +196,8 @@ status_indicator = ax.text(
     bbox={"boxstyle": "round,pad=0.35", "facecolor": "#666666", "edgecolor": "none"},
 )
 
-fig.autofmt_xdate()
-fig.subplots_adjust(bottom=0.14)
+fig.autofmt_xdate(rotation=0, ha="center")
+fig.subplots_adjust(bottom=0.18)
 
 segments = []
 
