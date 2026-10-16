@@ -1260,10 +1260,22 @@ while running:
     # Wait the full interval AFTER the sample.
     # --------------------------------------------------------------
 
+    schedule_anchor = start_time
     end_time = time.monotonic() + interval
 
-    while running and time.monotonic() < end_time:
+    while running:
         fig.canvas.flush_events()
+        if start_time != schedule_anchor:
+            schedule_anchor = start_time
+            elapsed = max(0.0, time.monotonic() - start_time)
+            interval = get_sampling_interval(elapsed)
+            end_time = time.monotonic() + interval
+            print(
+                f"Sampling schedule reset; next sample in {interval}s "
+                f"(graph span {elapsed / 60:.1f} min)"
+            )
+        if time.monotonic() >= end_time:
+            break
         time.sleep(0.2)
 
 
