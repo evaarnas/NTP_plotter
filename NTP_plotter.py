@@ -1,9 +1,5 @@
-import subprocess
-import ctypes
 import json
-import msvcrt
 import os
-import re
 import sys
 import time
 import math
@@ -15,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from matplotlib.widgets import TextBox, Button
+from tkinter import messagebox
 
 
 NTP_SERVER = "time.windows.com"
@@ -42,61 +39,11 @@ def get_sampling_interval(elapsed):
 
 
 def get_ntp_sample(server):
-    """Return (sample_time, offset_ms, error)."""
-
-    try:
-        result = subprocess.run(
-            [
-                "w32tm",
-                "/stripchart",
-                f"/computer:{server}",
-                "/samples:1",
-                "/dataonly"
-            ],
-            capture_output=True,
-            text=True
-        )
-    except Exception as e:
-        return None, None, str(e)
-
-    pattern = re.compile(
-        r"(\d\d:\d\d:\d\d),\s*([+-]?\d+\.\d+)s"
-    )
-
-    for line in result.stdout.splitlines():
-        match = pattern.match(line.strip())
-
-        if match:
-            time_str = match.group(1)
-            offset = -1 * float(match.group(2)) * 1000 # For some reason, ahead of time is negative and behind is positive
-
-            sample_time = datetime.strptime(
-                time_str,
-                "%H:%M:%S"
-            )
-
-            return sample_time, offset, None
-
-    # No valid NTP sample was found.
-    error = result.stderr.strip()
-
-    if not error:
-        error = result.stdout.strip()
-
-    if not error:
-        error = f"w32tm returned exit code {result.returncode}"
-
-    return None, None, error
-
-
-def get_packet_rtt(server):
-    """Return the UDP NTP request/reply time in milliseconds, or an error."""
+    """Return (local_sample_time, offset_ms, error, round_trip_ms)."""
+    ntp_epoch_delta = 2_208_988_800
+    fraction_scale = 1 << 32
     request = bytearray(48)
     request[0] = 0x23  # LI=0, NTP version 4, client mode
-    ntp_time = time.time() + 2_208_988_800
-    seconds = int(ntp_time)
-    fraction = int((ntp_time - seconds) * (1 << 32))
-    request[40:48] = struct.pack("!II", seconds, fraction)
 
     try:
         addresses = socket.getaddrinfo(
@@ -108,22 +55,61 @@ def get_packet_rtt(server):
             try:
                 with socket.socket(family, socktype, protocol) as sock:
                     sock.settimeout(2.0)
+                    t1 = time.time()
+                    ntp_time = t1 + ntp_epoch_delta
+                    seconds = int(ntp_time)
+                    fraction = int((ntp_time - seconds) * fraction_scale)
+                    request[40:48] = struct.pack("!II", seconds, fraction)
                     start = time.perf_counter()
                     sock.sendto(request, address)
                     response, _ = sock.recvfrom(512)
+                    t4 = time.time()
                     rtt_ms = (time.perf_counter() - start) * 1000
 
                 if len(response) < 48 or (response[0] & 0x07) != 4:
                     last_error = "Invalid NTP server response"
                     continue
+                if (response[0] >> 6) == 3:
+                    last_error = "NTP server reports an unsynchronized clock"
+                    continue
+                if response[1] == 0:
+                    last_error = "NTP server refused the request (Kiss-o'-Death)"
+                    continue
+                if response[1] > 15:
+                    last_error = "NTP server reports an invalid stratum"
+                    continue
+                if response[24:32] != request[40:48]:
+                    last_error = "NTP originate timestamp did not match the request"
+                    continue
 
-                return rtt_ms, None
+                def decode_timestamp(timestamp_bytes):
+                    ntp_seconds, ntp_fraction = struct.unpack(
+                        "!II", timestamp_bytes
+                    )
+                    return (
+                        ntp_seconds
+                        - ntp_epoch_delta
+                        + ntp_fraction / fraction_scale
+                    )
+
+                t2 = decode_timestamp(response[32:40])
+                t3 = decode_timestamp(response[40:48])
+                if response[32:40] == bytes(8) or response[40:48] == bytes(8):
+                    last_error = "NTP server returned an empty timestamp"
+                    continue
+
+                # NTP offset: server time minus local time, using the four
+                # timestamps defined in RFC 5905 section 8.
+                offset_ms = ((t2 - t1) + (t3 - t4)) * 500
+                sample_time = datetime.fromtimestamp(t4)
+                return sample_time, offset_ms, None, rtt_ms
+
             except OSError as e:
                 last_error = str(e)
 
-        return None, last_error
+        return None, None, last_error, None
     except OSError as e:
-        return None, str(e)
+        return None, None, str(e), None
 
 
 LOCK_FILE = os.path.join(
@@ -133,11 +119,18 @@ LOCK_FILE = os.path.join(
 
 
 def acquire_instance_lock():
-    """Hold an exclusive OS lock; Windows releases it if the process dies."""
+    """Hold a portable OS-level lock; the OS releases it if the process dies."""
     lock_handle = open(LOCK_FILE, "a+b")
     try:
-        lock_handle.seek(0)
-        msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        if os.name == "nt":
+            import msvcrt
+
+            lock_handle.seek(0)
+            msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         lock_handle.close()
         message = (
@@ -146,9 +139,7 @@ def acquire_instance_lock():
             "history file. Close the other instance first."
         )
         print(message)
-        ctypes.windll.user32.MessageBoxW(
-            None, message, "NTP Plotter", 0x10  # MB_ICONERROR
-        )
+        messagebox.showerror("NTP Plotter", message)
         sys.exit(1)
     return lock_handle
 
@@ -216,7 +207,7 @@ delay_times = []
 delay_values = []
 delay_line, = ax.plot(
     [], [], color="#e67e22", marker=".", markersize=4,
-    label="Approx. command duration",
+    label="Approx. NTP query duration",
     zorder=1,
 )
 rtt_times = []
@@ -1104,14 +1095,13 @@ while running:
 
     sample_start = time.monotonic()
 
-    sample_time, offset, error = get_ntp_sample(NTP_SERVER)
+    sample_time, offset, error, packet_rtt_ms = get_ntp_sample(NTP_SERVER)
 
     sample_duration = time.monotonic() - sample_start
-    packet_rtt_ms, packet_rtt_error = get_packet_rtt(NTP_SERVER)
     if packet_rtt_ms is not None:
         packet_rtt_summary = f"packet RTT {packet_rtt_ms:.1f} ms"
     else:
-        packet_rtt_summary = f"packet RTT unavailable: {packet_rtt_error}"
+        packet_rtt_summary = f"packet RTT unavailable: {error}"
     wall_end = datetime.now()
     monotonic_end = time.monotonic()
 
@@ -1129,8 +1119,8 @@ while running:
             "edgecolor": "none",
         })
 
-        # w32tm supplies the time of day only. Anchor it to the actual wall
-        # date, then choose the nearest date if the command crossed midnight.
+        # Anchor the packet's local time to the wall date, accounting for a
+        # request that happened to cross midnight.
         plot_time = datetime.combine(wall_end.date(), sample_time.time())
         if plot_time - wall_end > timedelta(hours=12):
             plot_time -= timedelta(days=1)
@@ -1188,7 +1178,7 @@ while running:
 
         print(
             f"{plot_time:%Y-%m-%d %H:%M:%S}, "
-            f"{offset:+.3f} ms, approximate command duration {sample_duration * 1000:.1f} ms, "
+            f"{offset:+.3f} ms, approximate NTP query duration {sample_duration * 1000:.1f} ms, "
             f"{packet_rtt_summary}"
         )
 
@@ -1237,7 +1227,7 @@ while running:
         print(
             f"{failure_time:%Y-%m-%d %H:%M:%S}, "
             f"NTP FAILED: {error} "
-            f"(approx. command duration {sample_duration * 1000:.1f} ms, "
+            f"(approx. NTP query duration {sample_duration * 1000:.1f} ms, "
             f"{packet_rtt_summary})"
         )
 

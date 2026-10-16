@@ -1,32 +1,41 @@
 # NTP Plotter
 
-A small Windows desktop tool that samples an NTP server and plots clock offset,
-measurement duration, and packet round-trip time over time.
+A small cross-platform desktop tool that samples an NTP server and plots clock offset,
+query duration, and packet round-trip time over time.
 
-![NTP Plotter showing clock offset, command duration, and packet RTT](assets/ntp-plotter.png)
+![NTP Plotter showing clock offset, query duration, and packet RTT](assets/ntp-plotter.png)
 
 ## Requirements
 
-- Windows (the clock-offset measurement uses the built-in `w32tm` command)
 - Python 3
 - Matplotlib
+- Tkinter (usually included with desktop Python installations)
 - Network access to the configured NTP server:
-  - `w32tm` must be able to query the server.
-  - UDP traffic to port 123 must be allowed for the packet-level RTT measurement.
+  - UDP traffic to port 123 must be allowed for NTP offset and RTT measurements.
 
 ## Setup
 
-In PowerShell, install Matplotlib:
+Install Matplotlib from PowerShell, Terminal, or a shell:
+
+```sh
+python -m pip install matplotlib
+```
+
+On Windows, `py` can be used instead of `python`:
 
 ```powershell
 py -m pip install matplotlib
 ```
 
-If the `py` launcher is not available, use `python` in its place.
-
 ## Run
 
-From the project directory:
+From the project directory, run:
+
+```sh
+python NTP_plotter.py
+```
+
+On Windows, the Python launcher can be used instead:
 
 ```powershell
 py .\NTP_plotter.py
@@ -43,16 +52,22 @@ one shows an error dialog and exits.
 
 The plot shows:
 
-- **NTP offset** — the server-reported clock offset, in milliseconds.
-- **Approx. command duration** — how long the `w32tm` offset query took.
-- **Packet-level UDP NTP RTT** — the elapsed time for a direct NTP request and
-  reply over UDP.
+- **NTP offset** — calculated in milliseconds from the local request and
+  response times and the server's receive and transmit timestamps in one NTP
+  exchange. Positive values mean the server clock is ahead of the local clock.
+- **Approx. NTP query duration** — elapsed time for the complete query,
+  including address lookup and the UDP exchange.
+- **Packet-level UDP NTP RTT** — elapsed send-to-reply time for that same
+  direct NTP request, measured with a monotonic clock.
 - **Connection failures and events** — failed offset samples, reconnections,
   and detected local system clock adjustments.
 
-Sampling starts every 2 seconds and gradually slows during long runs:
+Sampling starts every 2 seconds and gradually slows as the persisted graph
+span grows. Time spent with the app closed counts toward the graph span, so a
+restart continues at the appropriate interval. Resetting history starts the
+schedule over.
 
-| Elapsed time | Sampling interval |
+| Graph span | Sampling interval |
 | --- | --- |
 | First 10 minutes | 2 seconds |
 | 10–30 minutes | 5 seconds |
@@ -69,8 +84,12 @@ adjust the display caps. The percentile must be greater than 0 and at most 100;
 headroom must be greater than 0. This affects display scaling only, not the
 underlying samples.
 
+Time-axis dates appear when the date changes. Gaps longer than 10 minutes are
+shaded and labeled with the time between saved samples; plotted lines are
+broken across those gaps.
+
 ## Configure the NTP server
 
 Edit `NTP_SERVER` near the top of `NTP_plotter.py` to use a different server.
-The same server is used for both the `w32tm` offset query and the UDP RTT
-measurement.
+The server is queried directly over UDP port 123 for both offset and RTT
+measurements.
