@@ -252,8 +252,21 @@ def load_history():
 
     with history_file:
         for line_number, line in enumerate(history_file, start=1):
+            # JSON Lines permits blank lines between records. They can also be
+            # left behind if the file is edited or a write is interrupted.
+            if not line.strip():
+                continue
             try:
                 record = json.loads(line)
+            except json.JSONDecodeError as error:
+                print(
+                    f"Skipping invalid saved measurement at "
+                    f"{HISTORY_FILE}:{line_number}: {error}",
+                    file=sys.stderr,
+                )
+                continue
+
+            try:
                 if not isinstance(record, dict):
                     raise ValueError("record must be a JSON object")
                 sample_time = datetime.fromisoformat(record["timestamp"])
@@ -286,7 +299,7 @@ def load_history():
                     "segment": segment,
                     "events": events,
                 })
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(
                     f"Invalid saved measurement at {HISTORY_FILE}:{line_number}: {error}"
                 ) from error
